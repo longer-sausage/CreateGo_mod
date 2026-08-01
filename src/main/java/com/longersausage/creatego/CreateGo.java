@@ -9,6 +9,7 @@
 package com.longersausage.creatego;
 
 import com.longersausage.creatego.entity.NpcEntity;
+import com.longersausage.creatego.item.FourthDimensionalPocketItem;
 import com.longersausage.creatego.item.MapEditorItem;
 import com.longersausage.creatego.item.NpcEditorItem;
 import com.longersausage.creatego.network.ModNetwork;
@@ -49,6 +50,10 @@ public final class CreateGo {
     public static final DeferredHolder<Item, NpcEditorItem> NPC_EDITOR_ITEM = ITEMS.register(
             "npc_editor",
             () -> new NpcEditorItem(new Item.Properties().stacksTo(1))
+    );
+    public static final DeferredHolder<Item, FourthDimensionalPocketItem> FOURTH_DIMENSIONAL_POCKET_ITEM = ITEMS.register(
+            "fourth_dimensional_pocket",
+            () -> new FourthDimensionalPocketItem(new Item.Properties().stacksTo(1))
     );
     public static final DeferredHolder<EntityType<?>, EntityType<NpcEntity>> NPC_ENTITY = ENTITIES.register(
             "npc",

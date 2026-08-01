@@ -28,6 +28,17 @@ sourceSets.main.resources {
 }
 
 repositories {
+    // Resolve Sable Companion's public API artifact. / 解析 Sable Companion 的公开 API 构件。
+    exclusiveContent {
+        forRepository {
+            maven {
+                url = uri('https://maven.ryanhcode.dev/releases')
+            }
+        }
+        filter {
+            includeGroup('dev.ryanhcode.sable-companion')
+        }
+    }
     // Resolve Modern UI's public NeoForge artifact. / 解析 Modern UI 公开的 NeoForge 构件。
     maven {
         url = uri('https://maven.izzel.io/releases')
@@ -120,13 +131,12 @@ configurations {
 }
 
 dependencies {
+    // Compile against Sable's sub-level storage API; the installed mod supplies it at runtime.
+    // 针对 Sable 的子世界存储 API 编译，运行时由已安装的模组提供实现。
+    compileOnly "maven.modrinth:sable:${sable_version}"
+    compileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}"
     // Bundle runtime dimension creation so users only install the CreateGo jar. / 内嵌运行时维度创建库，使用户只需安装 CreateGo JAR。
-    jarJar(implementation("maven.modrinth:dynamic-dimensions-ar-edition:0.9.1+75e1622e-dirty")) {
-        version {
-            strictly '[0.9.1,0.10)'
-            prefer '0.9.1+75e1622e-dirty'
-        }
-    }
+    jarJar(implementation("maven.modrinth:dynamic-dimensions-ar-edition:0.9.1+75e1622e-dirty"))
     // Supply Dynamic Dimensions' packet dependency in development runs. / 为开发运行环境提供动态维度库所需的数据包依赖。
     localRuntime "maven.modrinth:badpackets:neo-0.8.2"
     // Compile against Modern UI while letting the client installation provide it at runtime.

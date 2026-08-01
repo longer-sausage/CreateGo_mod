@@ -1,6 +1,10 @@
 {
   "item.creatego.map_editor": "地图编辑器",
   "item.creatego.npc_editor": "NPC 编辑器",
+  "item.creatego.fourth_dimensional_pocket": "四次元口袋",
+  "tooltip.creatego.fourth_dimensional_pocket.empty": "存储状态：空",
+  "tooltip.creatego.fourth_dimensional_pocket.stored": "存储状态：已存储（%s）",
+  "tooltip.creatego.fourth_dimensional_pocket.unnamed": "未命名 Sable 物理结构",
   "entity.creatego.npc": "CreateGo NPC",
   "itemGroup.creatego": "CreateGo 机械动力向前冲"
 }
