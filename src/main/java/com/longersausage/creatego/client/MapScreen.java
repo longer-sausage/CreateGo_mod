@@ -32,6 +32,7 @@ import java.util.List;
  */
 public final class MapScreen extends BaseScreen {
     private static final int MAPS_PER_PAGE = 5;
+    private static final int LAYERS_PER_PAGE = 4;
 
     private ModState state;
     private String boundMapId;
@@ -54,6 +55,16 @@ public final class MapScreen extends BaseScreen {
     private Button saveNpcButton;
     private Button exitMapButton;
     private boolean deleteConfirmation;
+
+    private boolean isTerrainConfiguring;
+    private boolean isAdvancedConfiguring;
+    private int terrainPageIndex;
+    private List<MapDefinition.FlatLayer> editingFlatLayers = new ArrayList<>();
+    private List<EditBox> layerBlockFields = new ArrayList<>();
+    private List<EditBox> layerCountFields = new ArrayList<>();
+    private EditBox originXField;
+    private EditBox originYField;
+    private EditBox originZField;
 
     /**
      * Creates the default catalog or active-session screen.
@@ -119,7 +130,13 @@ public final class MapScreen extends BaseScreen {
         clearWidgets();
         resetWidgetReferences();
         if (isConfiguring()) {
-            buildConfigurationWidgets();
+            if (isTerrainConfiguring) {
+                buildTerrainWidgets();
+            } else if (isAdvancedConfiguring) {
+                buildAdvancedWidgets();
+            } else {
+                buildConfigurationWidgets();
+            }
         } else {
             buildCatalogWidgets();
         }
@@ -134,6 +151,9 @@ public final class MapScreen extends BaseScreen {
         spawnXField = null;
         spawnYField = null;
         spawnZField = null;
+        originXField = null;
+        originYField = null;
+        originZField = null;
         schematicButton = null;
         directionButton = null;
         enterButton = null;
@@ -141,6 +161,8 @@ public final class MapScreen extends BaseScreen {
         deleteButton = null;
         saveNpcButton = null;
         exitMapButton = null;
+        layerBlockFields.clear();
+        layerCountFields.clear();
     }
 
     /**
@@ -224,35 +246,247 @@ public final class MapScreen extends BaseScreen {
         directionButton = addRenderableWidget(ModernButton.create(
                 Component.empty(),
                 ignored -> cycleDirection()
-        ).bounds(left, top + 65, 180, 20).build());
+        ).bounds(left, top + 65, 185, 20).build());
         schematicButton = addRenderableWidget(ModernButton.create(
                 Component.empty(),
                 ignored -> ScreenHelper.message("请将鼠标悬停在蓝图选择框上滚动滚轮。")
-        ).bounds(left + 190, top + 65, 190, 20).build());
+        ).bounds(left + 195, top + 65, 185, 20).build());
+        addRenderableWidget(ModernButton.create(
+                Component.literal("高级设置"),
+                ignored -> openAdvancedConfig()
+        ).bounds(left, top + 95, 380, 20).build());
         saveNpcButton = addRenderableWidget(ModernButton.create(
                 Component.literal("保存 NPC"),
                 ignored -> saveAllNpcs()
-        ).bounds(left, top + 100, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
+        ).bounds(left, top + 125, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
         saveNpcButton.active = isEditing();
         addRenderableWidget(ModernButton.create(
                 Component.literal("上传所选蓝图作为地图结构"),
                 ignored -> uploadSchematic()
-        ).bounds(left + 195, top + 100, 185, 20).build());
+        ).bounds(left + 195, top + 125, 185, 20).build());
         exitMapButton = addRenderableWidget(ModernButton.create(
                 Component.literal("退出地图"),
                 ignored -> exitMap()
-        ).bounds(left, top + 135, 185, 20).variant(ModernButton.Variant.DANGER).build());
+        ).bounds(left, top + 155, 185, 20).variant(ModernButton.Variant.DANGER).build());
         exitMapButton.active = isEditing();
         deleteButton = addRenderableWidget(ModernButton.create(
                 Component.literal("删除地图"),
                 ignored -> confirmDeleteMap()
-        ).bounds(left + 195, top + 135, 185, 20).variant(ModernButton.Variant.DANGER).build());
+        ).bounds(left + 195, top + 155, 185, 20).variant(ModernButton.Variant.DANGER).build());
         addRenderableWidget(ModernButton.create(
                 Component.literal("完成"),
                 ignored -> finishConfiguration()
-        ).bounds(left, top + 165, 380, 20).variant(ModernButton.Variant.GHOST).build());
+        ).bounds(left, top + 185, 380, 20).variant(ModernButton.Variant.GHOST).build());
         loadConfigurationFields(map);
         refreshConfigurationLabels();
+    }
+
+    /**
+     * Builds advanced configuration widgets including structure origin coordinates and terrain entry.
+     * 构建高级设置控件，包括结构原点坐标与地形配置入口。
+     */
+    private void buildAdvancedWidgets() {
+        int left = width / 2 - 190;
+        int top = height / 2 - 125;
+        MapDefinition map = configuredMap();
+        originXField = addRenderableWidget(new ModernEditBox(
+                font, left + 80, top + 35, 70, 20, Component.literal("原点 X")
+        ));
+        originYField = addRenderableWidget(new ModernEditBox(
+                font, left + 185, top + 35, 70, 20, Component.literal("原点 Y")
+        ));
+        originZField = addRenderableWidget(new ModernEditBox(
+                font, left + 290, top + 35, 70, 20, Component.literal("原点 Z")
+        ));
+        addRenderableWidget(ModernButton.create(
+                Component.literal("配置地形"),
+                ignored -> openTerrainConfig()
+        ).bounds(left, top + 75, 380, 20).build());
+        addRenderableWidget(ModernButton.create(
+                Component.literal("返回"),
+                ignored -> closeAdvancedConfig()
+        ).bounds(left, top + 115, 380, 20).variant(ModernButton.Variant.GHOST).build());
+
+        if (map != null && originXField != null) {
+            originXField.setValue(Integer.toString(map.originX));
+            originYField.setValue(Integer.toString(map.originY));
+            originZField.setValue(Integer.toString(map.originZ));
+        }
+    }
+
+    private void openAdvancedConfig() {
+        isAdvancedConfiguring = true;
+        rebuildWidgets();
+    }
+
+    private void closeAdvancedConfig() {
+        syncAdvancedFieldsToMap();
+        isAdvancedConfiguring = false;
+        rebuildWidgets();
+    }
+
+    private void syncAdvancedFieldsToMap() {
+        MapDefinition map = configuredMap();
+        if (map != null && originXField != null) {
+            map.originX = ScreenHelper.parseInt(originXField.getValue(), "结构原点 X");
+            map.originY = ScreenHelper.parseInt(originYField.getValue(), "结构原点 Y");
+            map.originZ = ScreenHelper.parseInt(originZField.getValue(), "结构原点 Z");
+        }
+    }
+
+    /**
+     * Builds superflat terrain layer configuration widgets.
+     * 构建超平坦地层配置控件。
+     */
+    private void buildTerrainWidgets() {
+        int left = width / 2 - 190;
+        int top = height / 2 - 125;
+        addRenderableWidget(ModernButton.create(
+                Component.literal("+ 新增地层"),
+                ignored -> addFlatLayer()
+        ).bounds(left + 270, top + 5, 110, 20).variant(ModernButton.Variant.PRIMARY).build());
+
+        int total = editingFlatLayers.size();
+        int first = terrainPageIndex * LAYERS_PER_PAGE;
+        int last = Math.min(total, first + LAYERS_PER_PAGE);
+
+        for (int uiIndex = first; uiIndex < last; uiIndex++) {
+            int row = uiIndex - first;
+            int rowY = top + 35 + row * 28;
+            int listIndex = total - 1 - uiIndex;
+            MapDefinition.FlatLayer layer = editingFlatLayers.get(listIndex);
+            final int targetIndex = listIndex;
+
+            ModernEditBox blockBox = addRenderableWidget(new ModernEditBox(
+                    font, left + 55, rowY, 175, 20, Component.literal("方块 ID")
+            ));
+            blockBox.setMaxLength(64);
+            blockBox.setValue(layer.blockId);
+            layerBlockFields.add(blockBox);
+
+            ModernEditBox countBox = addRenderableWidget(new ModernEditBox(
+                    font, left + 240, rowY, 65, 20, Component.literal("层数")
+            ));
+            countBox.setMaxLength(5);
+            countBox.setFilter(value -> value.matches("[0-9]*"));
+            countBox.setValue(Integer.toString(layer.count));
+            layerCountFields.add(countBox);
+
+            addRenderableWidget(ModernButton.create(
+                    Component.literal("删除"),
+                    ignored -> removeFlatLayer(targetIndex)
+            ).bounds(left + 315, rowY, 65, 20).variant(ModernButton.Variant.DANGER).build());
+        }
+
+        Button previous = addRenderableWidget(ModernButton.create(
+                Component.literal("上一页"),
+                ignored -> changeTerrainPage(-1)
+        ).bounds(left, top + 155, 90, 20).build());
+        previous.active = terrainPageIndex > 0;
+
+        Button next = addRenderableWidget(ModernButton.create(
+                Component.literal("下一页"),
+                ignored -> changeTerrainPage(1)
+        ).bounds(left + 290, top + 155, 90, 20).build());
+        next.active = (terrainPageIndex + 1) * LAYERS_PER_PAGE < total;
+
+        addRenderableWidget(ModernButton.create(
+                Component.literal("确定保存地层"),
+                ignored -> saveTerrainConfig()
+        ).bounds(left, top + 185, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
+
+        addRenderableWidget(ModernButton.create(
+                Component.literal("取消"),
+                ignored -> cancelTerrainConfig()
+        ).bounds(left + 195, top + 185, 185, 20).variant(ModernButton.Variant.GHOST).build());
+    }
+
+    private void openTerrainConfig() {
+        MapDefinition map = configuredMap();
+        if (map == null) {
+            return;
+        }
+        editingFlatLayers = new ArrayList<>();
+        if (map.flatLayers != null) {
+            for (MapDefinition.FlatLayer layer : map.flatLayers) {
+                editingFlatLayers.add(new MapDefinition.FlatLayer(layer.blockId, layer.count));
+            }
+        }
+        isTerrainConfiguring = true;
+        terrainPageIndex = 0;
+        rebuildWidgets();
+    }
+
+    private void syncTerrainFieldsFromUI() {
+        int total = editingFlatLayers.size();
+        int first = terrainPageIndex * LAYERS_PER_PAGE;
+        for (int i = 0; i < layerBlockFields.size() && (first + i) < total; i++) {
+            int listIndex = total - 1 - (first + i);
+            MapDefinition.FlatLayer layer = editingFlatLayers.get(listIndex);
+            layer.blockId = layerBlockFields.get(i).getValue().strip();
+            int countVal = 1;
+            try {
+                countVal = Math.max(1, Integer.parseInt(layerCountFields.get(i).getValue().trim()));
+            } catch (NumberFormatException ignored) {
+            }
+            layer.count = countVal;
+        }
+    }
+
+    private void addFlatLayer() {
+        syncTerrainFieldsFromUI();
+        editingFlatLayers.add(new MapDefinition.FlatLayer("minecraft:dirt", 1));
+        terrainPageIndex = 0;
+        rebuildWidgets();
+    }
+
+    private void removeFlatLayer(int index) {
+        syncTerrainFieldsFromUI();
+        if (index >= 0 && index < editingFlatLayers.size()) {
+            editingFlatLayers.remove(index);
+        }
+        int maxPage = Math.max(0, (editingFlatLayers.size() - 1) / LAYERS_PER_PAGE);
+        terrainPageIndex = Math.min(terrainPageIndex, maxPage);
+        rebuildWidgets();
+    }
+
+    private void changeTerrainPage(int delta) {
+        syncTerrainFieldsFromUI();
+        int maxPage = Math.max(0, (editingFlatLayers.size() - 1) / LAYERS_PER_PAGE);
+        terrainPageIndex = Math.max(0, Math.min(maxPage, terrainPageIndex + delta));
+        rebuildWidgets();
+    }
+
+    private void saveTerrainConfig() {
+        syncTerrainFieldsFromUI();
+        for (int i = 0; i < editingFlatLayers.size(); i++) {
+            MapDefinition.FlatLayer layer = editingFlatLayers.get(i);
+            String id = layer.blockId == null ? "" : layer.blockId.strip().toLowerCase(java.util.Locale.ROOT);
+            if (id.isEmpty()) {
+                ScreenHelper.message("第 " + (i + 1) + " 层方块 ID 不能为空。");
+                return;
+            }
+            if (!id.contains(":")) {
+                id = "minecraft:" + id;
+            }
+            layer.blockId = id;
+            if (layer.count < 1) {
+                ScreenHelper.message("第 " + (i + 1) + " 层数必须大于 0。");
+                return;
+            }
+        }
+        MapDefinition map = configuredMap();
+        if (map != null) {
+            map.flatLayers = new ArrayList<>(editingFlatLayers);
+        }
+        isTerrainConfiguring = false;
+        rebuildWidgets();
+    }
+
+    private void cancelTerrainConfig() {
+        isTerrainConfiguring = false;
+        editingFlatLayers.clear();
+        rebuildWidgets();
     }
 
     /**
@@ -356,6 +590,8 @@ public final class MapScreen extends BaseScreen {
             return;
         }
         configuredMapId = selectedMapId;
+        isAdvancedConfiguring = false;
+        isTerrainConfiguring = false;
         deleteConfirmation = false;
         rebuildCollections();
         rebuildWidgets();
@@ -419,6 +655,21 @@ public final class MapScreen extends BaseScreen {
         form.spawnY = ScreenHelper.parseInt(spawnYField.getValue(), "出生 Y");
         form.spawnZ = ScreenHelper.parseInt(spawnZField.getValue(), "出生 Z");
         form.direction = direction;
+        MapDefinition map = configuredMap();
+        if (map != null) {
+            if (originXField != null) {
+                form.originX = ScreenHelper.parseInt(originXField.getValue(), "结构原点 X");
+                form.originY = ScreenHelper.parseInt(originYField.getValue(), "结构原点 Y");
+                form.originZ = ScreenHelper.parseInt(originZField.getValue(), "结构原点 Z");
+            } else {
+                form.originX = map.originX;
+                form.originY = map.originY;
+                form.originZ = map.originZ;
+            }
+            if (map.flatLayers != null) {
+                form.flatLayers = new ArrayList<>(map.flatLayers);
+            }
+        }
         return form;
     }
 
@@ -514,6 +765,8 @@ public final class MapScreen extends BaseScreen {
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
         if (isConfiguring()
+                && !isTerrainConfiguring
+                && !isAdvancedConfiguring
                 && schematicButton != null
                 && schematicButton.isMouseOver(mouseX, mouseY)
                 && !schematics.isEmpty()) {
@@ -538,7 +791,13 @@ public final class MapScreen extends BaseScreen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         UITheme.drawBackground(graphics, width, height);
         if (isConfiguring()) {
-            renderConfigurationBackground(graphics);
+            if (isTerrainConfiguring) {
+                renderTerrainConfigBackground(graphics);
+            } else if (isAdvancedConfiguring) {
+                renderAdvancedConfigBackground(graphics);
+            } else {
+                renderConfigurationBackground(graphics);
+            }
         } else {
             renderCatalogBackground(graphics);
         }
@@ -575,7 +834,7 @@ public final class MapScreen extends BaseScreen {
     private void renderConfigurationBackground(GuiGraphics graphics) {
         int left = width / 2 - 190;
         int top = height / 2 - 125;
-        drawPanel(graphics, left - 18, top - 30, 416, 250);
+        drawPanel(graphics, left - 18, top - 30, 416, 270);
         String heading = isEditing() ? "编辑中配置地图：" : "配置地图：";
         graphics.drawCenteredString(font, heading + configuredMapId, width / 2, top - 20, UITheme.TEXT);
         graphics.drawString(font, "出生点 X", left, top + 41, UITheme.TEXT_MUTED, false);
@@ -585,7 +844,7 @@ public final class MapScreen extends BaseScreen {
                 font,
                 "蓝图框悬停滚轮选择，Shift + 滚轮每次跳过 5 项",
                 left,
-                top + 190,
+                top + 210,
                 UITheme.ACCENT,
                 false
         );
@@ -594,11 +853,57 @@ public final class MapScreen extends BaseScreen {
                     font,
                     "仅“保存 NPC”会写入配置；直接退出地图、跨维或登出会丢弃未保存修改",
                     left,
-                    top + 205,
+                    top + 225,
                     UITheme.TEXT_MUTED,
                     false
             );
         }
+    }
+
+    /**
+     * Draws superflat terrain configuration panel and section headers.
+     * 绘制超平坦地形配置面板与栏目标题。
+     */
+    private void renderTerrainConfigBackground(GuiGraphics graphics) {
+        int left = width / 2 - 190;
+        int top = height / 2 - 125;
+        drawPanel(graphics, left - 18, top - 30, 416, 270);
+        graphics.drawCenteredString(font, "配置超平坦地形：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
+        graphics.drawString(font, "地层列表（从顶层到底层排列）：", left, top + 10, UITheme.TEXT_MUTED, false);
+        int total = editingFlatLayers.size();
+        int first = terrainPageIndex * LAYERS_PER_PAGE;
+        int last = Math.min(total, first + LAYERS_PER_PAGE);
+        for (int uiIndex = first; uiIndex < last; uiIndex++) {
+            int row = uiIndex - first;
+            int rowY = top + 35 + row * 28;
+            int layerNumber = total - uiIndex;
+            graphics.drawString(font, "第 " + layerNumber + " 层", left, rowY + 5, UITheme.TEXT_MUTED, false);
+        }
+        if (editingFlatLayers.isEmpty()) {
+            graphics.drawCenteredString(font, "暂无地层配置，请点击右上角加号新增。", width / 2, top + 75, UITheme.TEXT_DIM);
+        }
+        int totalPages = Math.max(1, (editingFlatLayers.size() + LAYERS_PER_PAGE - 1) / LAYERS_PER_PAGE);
+        graphics.drawCenteredString(
+                font,
+                "第 " + (terrainPageIndex + 1) + " / " + totalPages + " 页",
+                width / 2,
+                top + 160,
+                UITheme.TEXT_MUTED
+        );
+    }
+
+    /**
+     * Draws advanced map configuration panel and section headers.
+     * 绘制高级地图配置面板与栏目标题。
+     */
+    private void renderAdvancedConfigBackground(GuiGraphics graphics) {
+        int left = width / 2 - 190;
+        int top = height / 2 - 125;
+        drawPanel(graphics, left - 18, top - 30, 416, 270);
+        graphics.drawCenteredString(font, "高级设置：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
+        graphics.drawString(font, "结构原点 X", left, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Y", left + 165, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Z", left + 270, top + 41, UITheme.TEXT_MUTED, false);
     }
 
     /**

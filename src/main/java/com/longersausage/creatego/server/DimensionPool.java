@@ -9,10 +9,13 @@
 package com.longersausage.creatego.server;
 
 import com.longersausage.creatego.CreateGo;
+import com.longersausage.creatego.data.MapDefinition;
+import com.longersausage.creatego.data.ModStore;
 import com.longersausage.creatego.data.NpcData;
 import dev.galacticraft.dynamicdimensions.api.DynamicDimensionRegistry;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderSet;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -23,9 +26,12 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.util.valueproviders.ConstantInt;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.flat.FlatLayerInfo;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,9 +71,10 @@ public final class DimensionPool {
         ResourceLocation dimensionId = CreateGo.id(
                 "cg_dim_" + player.getUUID().toString().replace("-", "") + "_" + UUID.randomUUID().toString().replace("-", "")
         );
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
         ServerLevel level = DynamicDimensionRegistry.from(player.server).createDynamicDimension(
                 dimensionId,
-                createVoidGenerator(player.server),
+                createChunkGenerator(player.server, map),
                 createDimensionType()
         );
         if (level == null) {
@@ -449,19 +456,38 @@ public final class DimensionPool {
     }
 
     /**
-     * Builds a flat generator with no layers, features, lakes, or structures.
-     * 构建一个没有地层、特征、湖泊或结构的平坦生成器。
+     * Builds a flat generator with configured layers or empty void layers.
+     * 构建包含配置地层或空白地层的平坦生成器。
      *
      * @param server running server / 运行中的服务端
-     * @return completely empty chunk generator / 完全空白的区块生成器
+     * @param map map definition / 地图定义
+     * @return chunk generator with flat layers / 包含平坦地层的区块生成器
      */
-    private static FlatLevelSource createVoidGenerator(MinecraftServer server) {
+    private static FlatLevelSource createChunkGenerator(MinecraftServer server, MapDefinition map) {
         var access = server.registryAccess();
         var biomes = access.lookupOrThrow(Registries.BIOME);
+        List<FlatLayerInfo> layers = new java.util.ArrayList<>();
+        if (map != null && map.flatLayers != null) {
+            for (MapDefinition.FlatLayer layer : map.flatLayers) {
+                if (layer.blockId != null && !layer.blockId.isBlank() && layer.count > 0) {
+                    ResourceLocation location = ResourceLocation.tryParse(layer.blockId);
+                    if (location != null && BuiltInRegistries.BLOCK.containsKey(location)) {
+                        Block block = BuiltInRegistries.BLOCK.get(location);
+                        if (block != Blocks.AIR) {
+                            layers.add(new FlatLayerInfo(layer.count, block));
+                        }
+                    }
+                }
+            }
+        }
         FlatLevelGeneratorSettings settings = new FlatLevelGeneratorSettings(
                 Optional.of(HolderSet.direct()),
                 biomes.getOrThrow(Biomes.THE_VOID),
                 List.of()
+        ).withBiomeAndLayers(
+                layers,
+                Optional.of(HolderSet.direct()),
+                biomes.getOrThrow(Biomes.THE_VOID)
         );
         settings.updateLayers();
         return new FlatLevelSource(settings);

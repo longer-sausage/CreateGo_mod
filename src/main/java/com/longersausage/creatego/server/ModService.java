@@ -561,7 +561,11 @@ public final class ModService {
         map.spawnX = form.spawnX;
         map.spawnY = form.spawnY;
         map.spawnZ = form.spawnZ;
+        map.originX = form.originX;
+        map.originY = form.originY;
+        map.originZ = form.originZ;
         map.direction = form.direction == null ? MapDefinition.Direction.SOUTH : form.direction;
+        map.flatLayers = form.flatLayers == null ? new ArrayList<>() : new ArrayList<>(form.flatLayers);
     }
 
     /**
@@ -643,7 +647,7 @@ public final class ModService {
         map.sizeX = size.getX();
         map.sizeY = size.getY();
         map.sizeZ = size.getZ();
-        BlockPos origin = new BlockPos(CreateGo.ORIGIN_X, level.getMinBuildHeight(), CreateGo.ORIGIN_Z);
+        BlockPos origin = new BlockPos(map.originX, map.originY, map.originZ);
         boolean placed = template.placeInWorld(
                 level,
                 origin,

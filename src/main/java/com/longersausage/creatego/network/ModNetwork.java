@@ -221,7 +221,11 @@ public final class ModNetwork {
         public int spawnX;
         public int spawnY = 65;
         public int spawnZ;
+        public int originX;
+        public int originY;
+        public int originZ;
         public MapDefinition.Direction direction = MapDefinition.Direction.SOUTH;
+        public java.util.List<MapDefinition.FlatLayer> flatLayers = new java.util.ArrayList<>();
     }
 
     /**
