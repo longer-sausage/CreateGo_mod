@@ -56,7 +56,7 @@ public final class MapScreen extends BaseScreen {
     private Button enterButton;
     private Button configureButton;
     private Button deleteButton;
-    private Button saveNpcButton;
+    private Button saveMapContentsButton;
     private Button exitMapButton;
     private boolean deleteConfirmation;
     private boolean structureDeleteConfirmation;
@@ -173,7 +173,7 @@ public final class MapScreen extends BaseScreen {
         enterButton = null;
         configureButton = null;
         deleteButton = null;
-        saveNpcButton = null;
+        saveMapContentsButton = null;
         exitMapButton = null;
         layerBlockFields.clear();
         layerCountFields.clear();
@@ -269,11 +269,11 @@ public final class MapScreen extends BaseScreen {
                 Component.literal("高级设置"),
                 ignored -> openAdvancedConfig()
         ).bounds(left, top + 95, 185, 20).build());
-        saveNpcButton = addRenderableWidget(ModernButton.create(
-                Component.literal("保存 NPC"),
-                ignored -> saveAllNpcs()
+        saveMapContentsButton = addRenderableWidget(ModernButton.create(
+                Component.literal("保存 NPC 与物理结构"),
+                ignored -> saveMapContents()
         ).bounds(left + 195, top + 95, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
-        saveNpcButton.active = isEditing();
+        saveMapContentsButton.active = isEditing();
         exitMapButton = addRenderableWidget(ModernButton.create(
                 Component.literal("退出地图"),
                 ignored -> exitMap()
@@ -962,11 +962,11 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
-     * Saves every live NPC without closing the isolated editor dimension.
-     * 保存全部实时 NPC，但不关闭隔离编辑维度。
+     * Saves every live NPC and Sable physical structure without closing the editor dimension.
+     * 保存全部实时 NPC 与 Sable 物理结构，但不关闭隔离编辑维度。
      */
-    private void saveAllNpcs() {
-        ScreenHelper.send("save_all_npcs", new Object());
+    private void saveMapContents() {
+        ScreenHelper.send("save_map_contents", new Object());
     }
 
     /**
@@ -1105,7 +1105,7 @@ public final class MapScreen extends BaseScreen {
         if (isEditing()) {
             graphics.drawString(
                     font,
-                    "仅“保存 NPC”会写入配置；直接退出地图、跨维或登出会丢弃未保存修改",
+                    "仅“保存 NPC 与物理结构”会写入配置；直接退出地图、跨维或登出会丢弃未保存修改",
                     left,
                     top + 190,
                     UITheme.TEXT_MUTED,

@@ -101,6 +101,17 @@ public final class ModStore {
     }
 
     /**
+     * Returns the compressed Sable physical-structure snapshot owned by one map.
+     * 返回一张地图拥有的 Sable 物理结构压缩快照。
+     *
+     * @param mapId normalized map identifier / 规范化地图标识
+     * @return physical-structure snapshot path / 物理结构快照路径
+     */
+    public Path physicalStructureFile(String mapId) {
+        return mapDirectory(mapId).resolve("physical_structures.nbt");
+    }
+
+    /**
      * Returns the shared server skin directory.
      * 返回服务端共享皮肤目录。
      *

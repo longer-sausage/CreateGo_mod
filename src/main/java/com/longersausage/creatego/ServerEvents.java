@@ -100,8 +100,8 @@ public final class ServerEvents {
     }
 
     /**
-     * Completes dynamic dimension entries after runtime levels become registered.
-     * 在运行时维度完成注册后继续待处理的进入操作。
+     * Completes dynamic dimension entries and retains Sable structures during active editing sessions.
+     * 完成动态维度进入流程，并在活动编辑会话期间保持 Sable 物理结构驻留。
      *
      * @param event server post-tick event / 服务端刻结束事件
      */

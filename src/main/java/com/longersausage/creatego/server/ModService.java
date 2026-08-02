@@ -98,7 +98,7 @@ public final class ModService {
                         player,
                         ModStore.fromJson(json, ModNetwork.StructureRequest.class)
                 );
-                case "save_all_npcs" -> saveAllNpcData(player);
+                case "save_map_contents" -> saveMapContents(player);
                 case "save_npc" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "save_dialogue" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "delete_npc" -> deleteNpc(player, UUID.fromString(
@@ -247,13 +247,13 @@ public final class ModService {
     }
 
     /**
-     * Saves all NPC data in the requesting player's isolated dimension.
-     * 保存请求玩家隔离维度内的全部 NPC 数据。
+     * Saves all NPCs and Sable physical structures in the requesting player's isolated dimension.
+     * 保存请求玩家隔离维度内的全部 NPC 与 Sable 物理结构。
      *
      * @param player requesting operator / 请求管理员
      * @throws IOException when state cannot be written / 状态无法写入时抛出
      */
-    private static void saveAllNpcData(ServerPlayer player) throws IOException {
+    private static void saveMapContents(ServerPlayer player) throws IOException {
         DimensionPool.Session session = requireActiveSession(player);
         captureNpcData(player.server, session);
         ModStore store = ModStore.get(player.server);
@@ -261,15 +261,32 @@ public final class ModService {
         if (map == null) {
             throw new IllegalArgumentException("地图不存在。");
         }
+        int physicalStructureCount = MapPhysicalStructureStorage.save(
+                player.serverLevel(),
+                store.physicalStructureFile(map.id)
+        );
         map.npcs = session.npcDrafts().values().stream()
                 .map(ModService::copyNpc)
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         store.save();
+        LOGGER.info(
+                "玩家 [{}] 保存了地图内容 [地图: {}, NPC: {}, Sable 物理结构: {}]",
+                player.getScoreboardName(),
+                map.id,
+                map.npcs.size(),
+                physicalStructureCount
+        );
         ModNetwork.broadcastState(player);
         ModNetwork.send(
                 player,
                 "notice",
-                ModStore.toJson(new ModNetwork.MessageBody("地图中的全部 NPC 数据已保存。"))
+                ModStore.toJson(new ModNetwork.MessageBody(
+                        "地图中的全部 NPC 与 Sable 物理结构已保存（NPC："
+                                + map.npcs.size()
+                                + "，物理结构："
+                                + physicalStructureCount
+                                + "）。"
+                ))
         );
     }
 
@@ -412,6 +429,13 @@ public final class ModService {
                 ModNetwork.error(player, "地图加载失败：" + exception.getMessage());
             }
         }
+        // Keep every physical structure resident so a later explicit save can capture distant structures too.
+        // 保持全部物理结构驻留，使之后的显式保存也能捕获远处结构。
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (DimensionPool.activeSession(player) != null) {
+                MapPhysicalStructureStorage.keepLoaded(player.serverLevel());
+            }
+        }
     }
 
     /**
@@ -448,6 +472,10 @@ public final class ModService {
         preloadStructureChunks(level, preparedStructures, map.id);
         preparedStructures.forEach(prepared -> placeStructure(level, prepared));
         clearStructureTicks(level, preparedStructures, map.id);
+        int physicalStructureCount = MapPhysicalStructureStorage.load(
+                level,
+                store.physicalStructureFile(map.id)
+        );
         session.npcDrafts().clear();
         map.npcs.stream().map(ModService::copyNpc).forEach(npc -> {
             session.npcDrafts().put(npc.id, npc);
@@ -456,7 +484,12 @@ public final class ModService {
         // Complete structure loading before teleport so chunk tracking sends final chunks once.
         // 在传送前完成结构加载，使区块跟踪仅发送一次最终区块数据。
         teleportToSpawn(player, level, map);
-        LOGGER.info("成功为玩家 [{}] 加载并填充地图维度 [地图 ID: {}]", player.getScoreboardName(), map.id);
+        LOGGER.info(
+                "成功为玩家 [{}] 加载并填充地图维度 [地图 ID: {}, Sable 物理结构: {}]",
+                player.getScoreboardName(),
+                map.id,
+                physicalStructureCount
+        );
         ModNetwork.broadcastState(player);
         ModNetwork.send(player, "close_screen", "{}");
     }
@@ -554,7 +587,9 @@ public final class ModService {
             ModNetwork.send(
                     player,
                     "notice",
-                    ModStore.toJson(new ModNetwork.MessageBody("对话工作流已应用到当前会话；点击地图编辑器的“保存 NPC”后才会写入配置。"))
+                    ModStore.toJson(new ModNetwork.MessageBody(
+                            "对话工作流已应用到当前会话；点击地图编辑器的“保存 NPC 与物理结构”后才会写入配置。"
+                    ))
             );
         }
     }
