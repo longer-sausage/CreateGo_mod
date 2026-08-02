@@ -10,22 +10,16 @@ package com.longersausage.creatego.server;
 
 import com.longersausage.creatego.data.MapDefinition;
 import com.longersausage.creatego.data.ModStore;
-import com.longersausage.creatego.data.NpcData;
 import com.longersausage.creatego.network.ModNetwork;
 import com.longersausage.creatego.network.UploadChunkPayload;
 import net.minecraft.server.level.ServerPlayer;
-import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
 
@@ -108,17 +102,11 @@ public final class UploadManager {
     private static void commitSchematic(ServerPlayer player, String mapId, String fileName, byte[] bytes)
             throws IOException {
         ModStore store = ModStore.get(player.server);
-        MapDefinition map = store.state().maps.get(ModService.normalizeMapId(mapId));
-        if (map == null) {
-            throw new IllegalArgumentException("地图不存在。");
-        }
-        DimensionPool.Session session = DimensionPool.session(player);
-        if (session != null && !session.mapId().equals(map.id)) {
-            throw new IllegalArgumentException("不能在编辑会话中修改其他地图的蓝图。");
-        }
-        Path target = store.structureFile(map.id);
+        MapDefinition map = ModService.requireConfigurableMap(player, mapId);
+        String structureName = ModService.validateStructureName(fileName);
+        Path target = store.structureFile(map.id, structureName);
         Files.createDirectories(target.getParent());
-        Path temporary = target.resolveSibling("structure.nbt.upload");
+        Path temporary = target.resolveSibling(structureName + ".upload");
         Files.write(temporary, bytes);
         int[] size;
         try {
@@ -132,20 +120,29 @@ public final class UploadManager {
         } finally {
             Files.deleteIfExists(temporary);
         }
-        map.sizeX = size[0];
-        map.sizeY = size[1];
-        map.sizeZ = size[2];
-        map.schematicName = safeFileName(fileName);
+        MapDefinition.StructureData structure = ModService.findStructure(map, structureName);
+        if (structure == null) {
+            structure = new MapDefinition.StructureData();
+            structure.name = structureName;
+            map.structures.add(structure);
+        }
+        structure.sizeX = size[0];
+        structure.sizeY = size[1];
+        structure.sizeZ = size[2];
         store.save();
-        LOGGER.info("玩家 [{}] 成功上传蓝图 [地图: {}, 文件: {}, 尺寸: {}x{}x{}]", player.getScoreboardName(), map.id, fileName, size[0], size[1], size[2]);
+        LOGGER.info(
+                "玩家 [{}] 成功上传地图结构 [地图: {}, 结构: {}, 尺寸: {}x{}x{}]",
+                player.getScoreboardName(),
+                map.id,
+                structureName,
+                size[0],
+                size[1],
+                size[2]
+        );
         ModNetwork.broadcastState(player);
         ModNetwork.send(player, "notice", ModStore.toJson(
-                new ModNetwork.MessageBody("蓝图已保存到地图“" + map.id + "”。")
+                new ModNetwork.MessageBody("结构“" + structureName + "”已保存到地图“" + map.id + "”。")
         ));
-    }
-
-    private static String safeFileName(String value) {
-        return Path.of(value).getFileName().toString().replaceAll("[^A-Za-z0-9._ -]", "_");
     }
 
     private static final class UploadSession {

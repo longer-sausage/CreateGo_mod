@@ -221,11 +221,29 @@ public final class ModNetwork {
         public int spawnX;
         public int spawnY = 65;
         public int spawnZ;
+        public MapDefinition.Direction direction = MapDefinition.Direction.SOUTH;
+        public java.util.List<MapDefinition.FlatLayer> flatLayers = new java.util.ArrayList<>();
+    }
+
+    /**
+     * Defines one structure placement update.
+     * 定义一个结构放置设置更新。
+     */
+    public static final class StructureConfigurationForm {
+        public String mapId = "";
+        public String structureName = "";
         public int originX;
         public int originY;
         public int originZ;
-        public MapDefinition.Direction direction = MapDefinition.Direction.SOUTH;
-        public java.util.List<MapDefinition.FlatLayer> flatLayers = new java.util.ArrayList<>();
+    }
+
+    /**
+     * Identifies one structure owned by a map.
+     * 标识地图拥有的一个结构。
+     */
+    public static final class StructureRequest {
+        public String mapId = "";
+        public String structureName = "";
     }
 
     /**

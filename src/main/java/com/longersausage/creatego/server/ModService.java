@@ -27,7 +27,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.neoforged.neoforge.common.NeoForge;
@@ -54,6 +56,7 @@ import java.util.WeakHashMap;
 public final class ModService {
     private static final Logger LOGGER = LoggerFactory.getLogger(ModService.class);
     private static final Set<String> COMPARISON_OPERATORS = Set.of("≥", ">", "=", "≠", "<", "≤");
+    private static final int MAX_PRELOADED_STRUCTURE_CHUNKS = 1024;
     private static final Map<MinecraftServer, List<PendingEntry>> PENDING_ENTRIES = new WeakHashMap<>();
 
     private ModService() {
@@ -87,6 +90,14 @@ public final class ModService {
                 case "load_map" -> loadMap(player, ModStore.fromJson(json, MapIdRequest.class).mapId);
                 case "exit_map" -> exitMap(player);
                 case "delete_map" -> deleteMap(player, ModStore.fromJson(json, MapIdRequest.class).mapId);
+                case "save_structure_configuration" -> saveStructureConfiguration(
+                        player,
+                        ModStore.fromJson(json, ModNetwork.StructureConfigurationForm.class)
+                );
+                case "delete_structure" -> deleteStructure(
+                        player,
+                        ModStore.fromJson(json, ModNetwork.StructureRequest.class)
+                );
                 case "save_all_npcs" -> saveAllNpcData(player);
                 case "save_npc" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "save_dialogue" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
@@ -404,8 +415,8 @@ public final class ModService {
     }
 
     /**
-     * Places one map at X=0, Y=0, Z=0 and restores every persistent NPC.
-     * 在 X=0、Y=0、Z=0 放置地图，并恢复全部持久 NPC。
+     * Places every configured structure and restores every persistent NPC.
+     * 放置全部已配置结构，并恢复全部持久 NPC。
      */
     private static void populateSession(
             ServerPlayer player,
@@ -422,15 +433,28 @@ public final class ModService {
         if (map == null) {
             throw new IllegalArgumentException("地图已被删除。");
         }
-        Path structure = ModStore.get(player.server).structureFile(map.id);
-        if (Files.isRegularFile(structure)) {
-            placeStructure(level, structure, map);
+        ModStore store = ModStore.get(player.server);
+        List<PreparedStructure> preparedStructures = new ArrayList<>();
+        if (map.structures != null) {
+            for (MapDefinition.StructureData structure : map.structures) {
+                Path file = store.structureFile(map.id, structure.name);
+                if (Files.isRegularFile(file)) {
+                    preparedStructures.add(prepareStructure(level, file, structure));
+                } else {
+                    LOGGER.warn("地图结构文件不存在 [地图: {}, 结构: {}]", map.id, structure.name);
+                }
+            }
         }
+        preloadStructureChunks(level, preparedStructures, map.id);
+        preparedStructures.forEach(prepared -> placeStructure(level, prepared));
+        clearStructureTicks(level, preparedStructures, map.id);
         session.npcDrafts().clear();
         map.npcs.stream().map(ModService::copyNpc).forEach(npc -> {
             session.npcDrafts().put(npc.id, npc);
             spawnNpc(level, npc);
         });
+        // Complete structure loading before teleport so chunk tracking sends final chunks once.
+        // 在传送前完成结构加载，使区块跟踪仅发送一次最终区块数据。
         teleportToSpawn(player, level, map);
         LOGGER.info("成功为玩家 [{}] 加载并填充地图维度 [地图 ID: {}]", player.getScoreboardName(), map.id);
         ModNetwork.broadcastState(player);
@@ -561,11 +585,143 @@ public final class ModService {
         map.spawnX = form.spawnX;
         map.spawnY = form.spawnY;
         map.spawnZ = form.spawnZ;
-        map.originX = form.originX;
-        map.originY = form.originY;
-        map.originZ = form.originZ;
         map.direction = form.direction == null ? MapDefinition.Direction.SOUTH : form.direction;
         map.flatLayers = form.flatLayers == null ? new ArrayList<>() : new ArrayList<>(form.flatLayers);
+    }
+
+    /**
+     * Saves the independent placement origin of one map structure.
+     * 保存一个地图结构的独立放置原点。
+     *
+     * @param player requesting operator / 请求管理员
+     * @param form structure configuration / 结构配置
+     * @throws IOException when state cannot be written / 状态无法写入时抛出
+     */
+    private static void saveStructureConfiguration(
+            ServerPlayer player,
+            ModNetwork.StructureConfigurationForm form
+    ) throws IOException {
+        MapDefinition map = requireConfigurableMap(player, form.mapId);
+        String structureName = validateStructureName(form.structureName);
+        MapDefinition.StructureData structure = findStructure(map, structureName);
+        if (structure == null) {
+            throw new IllegalArgumentException("结构不存在。");
+        }
+        structure.originX = form.originX;
+        structure.originY = form.originY;
+        structure.originZ = form.originZ;
+        ModStore.get(player.server).save();
+        LOGGER.info(
+                "玩家 [{}] 保存了结构配置 [地图: {}, 结构: {}, 原点: ({}, {}, {})]",
+                player.getScoreboardName(),
+                map.id,
+                structure.name,
+                structure.originX,
+                structure.originY,
+                structure.originZ
+        );
+        ModNetwork.broadcastState(player);
+        ModNetwork.send(player, "notice", ModStore.toJson(
+                new ModNetwork.MessageBody("结构“" + structure.name + "”的配置已保存。")
+        ));
+    }
+
+    /**
+     * Deletes one structure document and its exact schematic file.
+     * 删除一个结构配置及其对应的蓝图文件。
+     *
+     * @param player requesting operator / 请求管理员
+     * @param request structure identity / 结构标识
+     * @throws IOException when state or the schematic cannot be deleted / 状态或蓝图无法删除时抛出
+     */
+    private static void deleteStructure(ServerPlayer player, ModNetwork.StructureRequest request) throws IOException {
+        MapDefinition map = requireConfigurableMap(player, request.mapId);
+        String structureName = validateStructureName(request.structureName);
+        MapDefinition.StructureData structure = findStructure(map, structureName);
+        if (structure == null) {
+            throw new IllegalArgumentException("结构不存在。");
+        }
+        Files.deleteIfExists(ModStore.get(player.server).structureFile(map.id, structure.name));
+        map.structures.remove(structure);
+        ModStore.get(player.server).save();
+        LOGGER.info(
+                "玩家 [{}] 删除了地图结构 [地图: {}, 结构: {}]",
+                player.getScoreboardName(),
+                map.id,
+                structure.name
+        );
+        ModNetwork.broadcastState(player);
+        ModNetwork.send(player, "notice", ModStore.toJson(
+                new ModNetwork.MessageBody("结构“" + structure.name + "”已删除。")
+        ));
+    }
+
+    /**
+     * Returns a map that the player may modify from the current session context.
+     * 返回玩家在当前会话上下文中可修改的地图。
+     *
+     * @param player requesting operator / 请求管理员
+     * @param rawMapId requested map identifier / 请求地图标识
+     * @return configurable map / 可配置地图
+     */
+    public static MapDefinition requireConfigurableMap(ServerPlayer player, String rawMapId) {
+        String mapId = normalizeMapId(rawMapId);
+        String boundMapId = DimensionPool.boundMapId(player);
+        if (!boundMapId.isEmpty() && !boundMapId.equals(mapId)) {
+            throw new IllegalArgumentException("不能在会话中配置其他地图。");
+        }
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
+        if (map == null) {
+            throw new IllegalArgumentException("地图不存在。");
+        }
+        if (map.structures == null) {
+            map.structures = new ArrayList<>();
+        }
+        return map;
+    }
+
+    /**
+     * Validates an exact schematic filename used as the structure name.
+     * 校验用作结构名的完整蓝图文件名。
+     *
+     * @param value filename received from the client / 客户端传入的文件名
+     * @return unchanged safe filename / 未更改的安全文件名
+     */
+    public static String validateStructureName(String value) {
+        if (value == null || value.isBlank() || value.length() > 128) {
+            throw new IllegalArgumentException("结构名称不合法。");
+        }
+        String filename;
+        try {
+            filename = Path.of(value).getFileName().toString();
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("结构名称不合法。", exception);
+        }
+        if (!filename.equals(value)
+                || !filename.toLowerCase(Locale.ROOT).endsWith(".nbt")
+                || filename.equals(".")
+                || filename.equals("..")) {
+            throw new IllegalArgumentException("结构名称必须与安全的 .nbt 蓝图文件名一致。");
+        }
+        return filename;
+    }
+
+    /**
+     * Finds one structure by its exact filename.
+     * 按完整文件名查找一个结构。
+     *
+     * @param map owning map / 所属地图
+     * @param structureName exact structure name / 完整结构名
+     * @return matching structure, or {@code null} / 匹配结构，不存在时返回 {@code null}
+     */
+    public static MapDefinition.StructureData findStructure(MapDefinition map, String structureName) {
+        if (map.structures == null) {
+            return null;
+        }
+        return map.structures.stream()
+                .filter(structure -> structure != null && structureName.equals(structure.name))
+                .findFirst()
+                .orElse(null);
     }
 
     /**
@@ -636,28 +792,123 @@ public final class ModService {
     }
 
     /**
-     * Places a compressed structure at the lowest build coordinate (0, 0, 0).
-     * 在最低建筑坐标（0、0、0）放置压缩结构。
+     * Reads one structure template before chunk preloading begins.
+     * 在开始区块预加载前读取一个结构模板。
+     *
+     * @param level target level / 目标世界
+     * @param file compressed structure file / 压缩结构文件
+     * @param structure placement metadata / 放置元数据
+     * @return prepared structure placement / 已准备的结构放置数据
+     * @throws IOException when structure data cannot be read / 结构数据无法读取时抛出
      */
-    private static void placeStructure(ServerLevel level, Path file, MapDefinition map) throws IOException {
+    private static PreparedStructure prepareStructure(
+            ServerLevel level,
+            Path file,
+            MapDefinition.StructureData structure
+    ) throws IOException {
         CompoundTag root = NbtIo.readCompressed(file, NbtAccounter.create(64L * 1024L * 1024L));
         StructureTemplate template = new StructureTemplate();
         template.load(level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BLOCK), root);
         Vec3i size = template.getSize();
-        map.sizeX = size.getX();
-        map.sizeY = size.getY();
-        map.sizeZ = size.getZ();
-        BlockPos origin = new BlockPos(map.originX, map.originY, map.originZ);
-        boolean placed = template.placeInWorld(
+        if (size.getX() < 1 || size.getY() < 1 || size.getZ() < 1) {
+            throw new IllegalArgumentException("蓝图尺寸必须全部大于 0：" + structure.name);
+        }
+        structure.sizeX = size.getX();
+        structure.sizeY = size.getY();
+        structure.sizeZ = size.getZ();
+        BlockPos origin = new BlockPos(structure.originX, structure.originY, structure.originZ);
+        long maxX = (long) origin.getX() + size.getX() - 1L;
+        long maxY = (long) origin.getY() + size.getY() - 1L;
+        long maxZ = (long) origin.getZ() + size.getZ() - 1L;
+        if (maxX > Integer.MAX_VALUE || maxY > Integer.MAX_VALUE || maxZ > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("蓝图坐标超出可放置范围：" + structure.name);
+        }
+        BoundingBox bounds = new BoundingBox(
+                origin.getX(),
+                origin.getY(),
+                origin.getZ(),
+                (int) maxX,
+                (int) maxY,
+                (int) maxZ
+        );
+        return new PreparedStructure(template, structure.name, origin, size, bounds);
+    }
+
+    /**
+     * Preloads the deduplicated chunk footprint of every map structure.
+     * 预加载地图全部结构去重后的区块覆盖范围。
+     *
+     * @param level target level / 目标世界
+     * @param structures prepared structures / 已准备结构
+     * @param mapId owning map identifier / 所属地图标识
+     */
+    private static void preloadStructureChunks(
+            ServerLevel level,
+            List<PreparedStructure> structures,
+            String mapId
+    ) {
+        Set<Long> chunks = new HashSet<>();
+        for (PreparedStructure structure : structures) {
+            int minChunkX = Math.floorDiv(structure.bounds.minX(), 16);
+            int minChunkZ = Math.floorDiv(structure.bounds.minZ(), 16);
+            int maxChunkX = Math.floorDiv(structure.bounds.maxX(), 16);
+            int maxChunkZ = Math.floorDiv(structure.bounds.maxZ(), 16);
+            for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                    chunks.add(ChunkPos.asLong(chunkX, chunkZ));
+                    if (chunks.size() > MAX_PRELOADED_STRUCTURE_CHUNKS) {
+                        throw new IllegalArgumentException(
+                                "地图结构覆盖区块超过预加载上限（" + MAX_PRELOADED_STRUCTURE_CHUNKS + "）。"
+                        );
+                    }
+                }
+            }
+        }
+        LOGGER.debug("预加载地图结构区块 [地图: {}, 数量: {}]", mapId, chunks.size());
+        for (long packedChunk : chunks) {
+            level.getChunk(ChunkPos.getX(packedChunk), ChunkPos.getZ(packedChunk));
+        }
+    }
+
+    /**
+     * Clears block and fluid ticks created inside every loaded structure volume.
+     * 清除全部已加载结构范围内产生的方块与流体计划刻。
+     *
+     * @param level target level / 目标世界
+     * @param structures placed structures / 已放置结构
+     * @param mapId owning map identifier / 所属地图标识
+     */
+    private static void clearStructureTicks(
+            ServerLevel level,
+            List<PreparedStructure> structures,
+            String mapId
+    ) {
+        for (PreparedStructure structure : structures) {
+            level.getBlockTicks().clearArea(structure.bounds);
+            level.getFluidTicks().clearArea(structure.bounds);
+        }
+        LOGGER.debug("清理地图结构计划刻 [地图: {}, 结构数量: {}]", mapId, structures.size());
+    }
+
+    /**
+     * Places one prepared structure without neighbor, shape, or client updates.
+     * 在不触发邻居、形状或客户端更新的情况下放置一个已准备结构。
+     *
+     * @param level target level / 目标世界
+     * @param prepared prepared structure / 已准备结构
+     */
+    private static void placeStructure(ServerLevel level, PreparedStructure prepared) {
+        StructurePlaceSettings settings = new StructurePlaceSettings().setKnownShape(true);
+        boolean placed = prepared.template.placeInWorld(
                 level,
-                origin,
-                origin,
-                new StructurePlaceSettings(),
+                prepared.origin,
+                prepared.origin,
+                settings,
                 level.random,
-                Block.UPDATE_CLIENTS
+                Block.UPDATE_NONE
         );
         if (!placed) {
-            throw new IllegalStateException("蓝图放置失败。");
+            throw new IllegalStateException("蓝图放置失败：" + prepared.name);
         }
     }
 
@@ -835,6 +1086,25 @@ public final class ModService {
         if (targetId == sourceId) {
             throw new IllegalArgumentException("对话节点不能连接到自身。");
         }
+    }
+
+    /**
+     * Holds a decoded structure template and its resolved placement bounds.
+     * 保存已解码的结构模板及其解析后的放置范围。
+     *
+     * @param template decoded structure template / 已解码结构模板
+     * @param name exact structure name / 完整结构名
+     * @param origin configured placement origin / 已配置放置原点
+     * @param size structure dimensions / 结构尺寸
+     * @param bounds inclusive structure bounds / 结构闭区间边界
+     */
+    private record PreparedStructure(
+            StructureTemplate template,
+            String name,
+            BlockPos origin,
+            Vec3i size,
+            BoundingBox bounds
+    ) {
     }
 
     /**

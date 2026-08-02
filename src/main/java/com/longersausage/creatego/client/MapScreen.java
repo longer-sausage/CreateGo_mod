@@ -33,6 +33,7 @@ import java.util.List;
 public final class MapScreen extends BaseScreen {
     private static final int MAPS_PER_PAGE = 5;
     private static final int LAYERS_PER_PAGE = 4;
+    private static final int STRUCTURES_PER_PAGE = 4;
 
     private ModState state;
     private String boundMapId;
@@ -40,8 +41,11 @@ public final class MapScreen extends BaseScreen {
     private String configuredMapId = "";
     private List<MapDefinition> maps = new ArrayList<>();
     private List<Path> schematics = List.of();
+    private List<MapDefinition.StructureData> structures = new ArrayList<>();
     private int pageIndex;
     private int schematicIndex;
+    private int structurePageIndex;
+    private String selectedStructureName = "";
     private MapDefinition.Direction direction = MapDefinition.Direction.SOUTH;
     private EditBox idField;
     private EditBox spawnXField;
@@ -55,9 +59,12 @@ public final class MapScreen extends BaseScreen {
     private Button saveNpcButton;
     private Button exitMapButton;
     private boolean deleteConfirmation;
+    private boolean structureDeleteConfirmation;
 
     private boolean isTerrainConfiguring;
     private boolean isAdvancedConfiguring;
+    private boolean isStructureConfiguring;
+    private boolean isStructureDetailConfiguring;
     private int terrainPageIndex;
     private List<MapDefinition.FlatLayer> editingFlatLayers = new ArrayList<>();
     private List<EditBox> layerBlockFields = new ArrayList<>();
@@ -105,6 +112,7 @@ public final class MapScreen extends BaseScreen {
             configuredMapId = boundMapId;
         }
         deleteConfirmation = false;
+        structureDeleteConfirmation = false;
         rebuildCollections();
         if (minecraft != null) {
             rebuildWidgets();
@@ -130,7 +138,13 @@ public final class MapScreen extends BaseScreen {
         clearWidgets();
         resetWidgetReferences();
         if (isConfiguring()) {
-            if (isTerrainConfiguring) {
+            if (isStructureConfiguring) {
+                if (isStructureDetailConfiguring) {
+                    buildStructureDetailWidgets();
+                } else {
+                    buildStructureWidgets();
+                }
+            } else if (isTerrainConfiguring) {
                 buildTerrainWidgets();
             } else if (isAdvancedConfiguring) {
                 buildAdvancedWidgets();
@@ -227,8 +241,8 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
-     * Builds persistent metadata and scroll-selected schematic controls.
-     * 构建持久元数据与滚轮选择蓝图控件。
+     * Builds persistent metadata and entries for specialized configuration screens.
+     * 构建持久元数据以及专用配置界面的入口。
      */
     private void buildConfigurationWidgets() {
         int left = width / 2 - 190;
@@ -247,48 +261,156 @@ public final class MapScreen extends BaseScreen {
                 Component.empty(),
                 ignored -> cycleDirection()
         ).bounds(left, top + 65, 185, 20).build());
-        schematicButton = addRenderableWidget(ModernButton.create(
-                Component.empty(),
-                ignored -> ScreenHelper.message("请将鼠标悬停在蓝图选择框上滚动滚轮。")
+        addRenderableWidget(ModernButton.create(
+                Component.literal("配置结构"),
+                ignored -> openStructureConfig()
         ).bounds(left + 195, top + 65, 185, 20).build());
         addRenderableWidget(ModernButton.create(
                 Component.literal("高级设置"),
                 ignored -> openAdvancedConfig()
-        ).bounds(left, top + 95, 380, 20).build());
+        ).bounds(left, top + 95, 185, 20).build());
         saveNpcButton = addRenderableWidget(ModernButton.create(
                 Component.literal("保存 NPC"),
                 ignored -> saveAllNpcs()
-        ).bounds(left, top + 125, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
+        ).bounds(left + 195, top + 95, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
         saveNpcButton.active = isEditing();
-        addRenderableWidget(ModernButton.create(
-                Component.literal("上传所选蓝图作为地图结构"),
-                ignored -> uploadSchematic()
-        ).bounds(left + 195, top + 125, 185, 20).build());
         exitMapButton = addRenderableWidget(ModernButton.create(
                 Component.literal("退出地图"),
                 ignored -> exitMap()
-        ).bounds(left, top + 155, 185, 20).variant(ModernButton.Variant.DANGER).build());
+        ).bounds(left, top + 125, 185, 20).variant(ModernButton.Variant.DANGER).build());
         exitMapButton.active = isEditing();
         deleteButton = addRenderableWidget(ModernButton.create(
                 Component.literal("删除地图"),
                 ignored -> confirmDeleteMap()
-        ).bounds(left + 195, top + 155, 185, 20).variant(ModernButton.Variant.DANGER).build());
+        ).bounds(left + 195, top + 125, 185, 20).variant(ModernButton.Variant.DANGER).build());
         addRenderableWidget(ModernButton.create(
                 Component.literal("完成"),
                 ignored -> finishConfiguration()
-        ).bounds(left, top + 185, 380, 20).variant(ModernButton.Variant.GHOST).build());
+        ).bounds(left, top + 155, 380, 20).variant(ModernButton.Variant.GHOST).build());
         loadConfigurationFields(map);
         refreshConfigurationLabels();
     }
 
     /**
-     * Builds advanced configuration widgets including structure origin coordinates and terrain entry.
-     * 构建高级设置控件，包括结构原点坐标与地形配置入口。
+     * Builds advanced configuration widgets for terrain settings.
+     * 构建用于地形设置的高级配置控件。
      */
     private void buildAdvancedWidgets() {
         int left = width / 2 - 190;
         int top = height / 2 - 125;
+        addRenderableWidget(ModernButton.create(
+                Component.literal("配置地形"),
+                ignored -> openTerrainConfig()
+        ).bounds(left, top + 35, 380, 20).build());
+        addRenderableWidget(ModernButton.create(
+                Component.literal("返回"),
+                ignored -> closeAdvancedConfig()
+        ).bounds(left, top + 75, 380, 20).variant(ModernButton.Variant.GHOST).build());
+    }
+
+    /**
+     * Opens advanced terrain settings while preserving visible general fields.
+     * 打开高级地形设置，同时保留可见的常规字段。
+     */
+    private void openAdvancedConfig() {
+        try {
+            syncConfigurationFieldsToMap();
+            isAdvancedConfiguring = true;
+            rebuildWidgets();
+        } catch (IllegalArgumentException exception) {
+            ScreenHelper.message(exception.getMessage());
+        }
+    }
+
+    /**
+     * Returns from advanced settings to the shared map form.
+     * 从高级设置返回共用地图表单。
+     */
+    private void closeAdvancedConfig() {
+        isAdvancedConfiguring = false;
+        rebuildWidgets();
+    }
+
+    /**
+     * Copies visible general fields into the client snapshot before changing sub-screens.
+     * 在切换子界面前将可见常规字段复制到客户端快照。
+     */
+    private void syncConfigurationFieldsToMap() {
         MapDefinition map = configuredMap();
+        if (map == null || spawnXField == null) {
+            return;
+        }
+        map.spawnX = ScreenHelper.parseInt(spawnXField.getValue(), "出生 X");
+        map.spawnY = ScreenHelper.parseInt(spawnYField.getValue(), "出生 Y");
+        map.spawnZ = ScreenHelper.parseInt(spawnZField.getValue(), "出生 Z");
+        map.direction = direction;
+    }
+
+    /**
+     * Builds the dedicated multi-structure configuration screen.
+     * 构建专用的多结构配置界面。
+     */
+    private void buildStructureWidgets() {
+        int left = width / 2 - 190;
+        int top = height / 2 - 145;
+        int first = structurePageIndex * STRUCTURES_PER_PAGE;
+        int last = Math.min(structures.size(), first + STRUCTURES_PER_PAGE);
+        for (int index = first; index < last; index++) {
+            MapDefinition.StructureData structure = structures.get(index);
+            int row = index - first;
+            addRenderableWidget(ModernButton.create(
+                    Component.literal(structure.name),
+                    ignored -> openStructureDetail(structure.name)
+            ).bounds(left, top + 25 + row * 25, 300, 20).build());
+            boolean confirming = structureDeleteConfirmation
+                    && structure.name.equals(selectedStructureName);
+            addRenderableWidget(ModernButton.create(
+                    Component.literal(confirming ? "确认" : "删除"),
+                    ignored -> confirmDeleteStructure(structure.name)
+            ).bounds(left + 310, top + 25 + row * 25, 70, 20)
+                    .variant(ModernButton.Variant.DANGER)
+                    .build());
+        }
+
+        Button previous = addRenderableWidget(ModernButton.create(
+                Component.literal("上一页"),
+                ignored -> changeStructurePage(-1)
+        ).bounds(left, top + 130, 90, 20).build());
+        previous.active = structurePageIndex > 0;
+        Button next = addRenderableWidget(ModernButton.create(
+                Component.literal("下一页"),
+                ignored -> changeStructurePage(1)
+        ).bounds(left + 290, top + 130, 90, 20).build());
+        next.active = (structurePageIndex + 1) * STRUCTURES_PER_PAGE < structures.size();
+
+        schematicButton = addRenderableWidget(ModernButton.create(
+                Component.empty(),
+                ignored -> ScreenHelper.message("请将鼠标悬停在蓝图选择框上滚动滚轮。")
+        ).bounds(left, top + 160, 260, 20).build());
+        addRenderableWidget(ModernButton.create(
+                Component.literal("上传蓝图"),
+                ignored -> uploadSchematic()
+        ).bounds(left + 270, top + 160, 110, 20).variant(ModernButton.Variant.PRIMARY).build());
+        addRenderableWidget(ModernButton.create(
+                Component.literal("返回地图配置"),
+                ignored -> closeStructureConfig()
+        ).bounds(left, top + 205, 380, 20).variant(ModernButton.Variant.GHOST).build());
+        refreshStructureLabels();
+    }
+
+    /**
+     * Builds the detailed settings screen for one uploaded structure.
+     * 构建一个已上传结构的详细设置界面。
+     */
+    private void buildStructureDetailWidgets() {
+        int left = width / 2 - 190;
+        int top = height / 2 - 100;
+        MapDefinition.StructureData structure = selectedStructure();
+        if (structure == null) {
+            isStructureDetailConfiguring = false;
+            buildStructureWidgets();
+            return;
+        }
         originXField = addRenderableWidget(new ModernEditBox(
                 font, left + 80, top + 35, 70, 20, Component.literal("原点 X")
         ));
@@ -298,39 +420,159 @@ public final class MapScreen extends BaseScreen {
         originZField = addRenderableWidget(new ModernEditBox(
                 font, left + 290, top + 35, 70, 20, Component.literal("原点 Z")
         ));
+        originXField.setValue(Integer.toString(structure.originX));
+        originYField.setValue(Integer.toString(structure.originY));
+        originZField.setValue(Integer.toString(structure.originZ));
         addRenderableWidget(ModernButton.create(
-                Component.literal("配置地形"),
-                ignored -> openTerrainConfig()
-        ).bounds(left, top + 75, 380, 20).build());
-        addRenderableWidget(ModernButton.create(
-                Component.literal("返回"),
-                ignored -> closeAdvancedConfig()
-        ).bounds(left, top + 115, 380, 20).variant(ModernButton.Variant.GHOST).build());
+                Component.literal("完成"),
+                ignored -> finishStructureDetail()
+        ).bounds(left, top + 70, 380, 20).variant(ModernButton.Variant.PRIMARY).build());
+    }
 
-        if (map != null && originXField != null) {
-            originXField.setValue(Integer.toString(map.originX));
-            originYField.setValue(Integer.toString(map.originY));
-            originZField.setValue(Integer.toString(map.originZ));
+    /**
+     * Opens structure configuration after saving general map metadata.
+     * 保存地图常规元数据后打开结构配置。
+     */
+    private void openStructureConfig() {
+        try {
+            ScreenHelper.send("save_map", parseConfigurationForm());
+            isStructureConfiguring = true;
+            isStructureDetailConfiguring = false;
+            structureDeleteConfirmation = false;
+            selectedStructureName = "";
+            rebuildWidgets();
+        } catch (IllegalArgumentException exception) {
+            ScreenHelper.message(exception.getMessage());
         }
     }
 
-    private void openAdvancedConfig() {
-        isAdvancedConfiguring = true;
+    /**
+     * Returns from the structure overview to the shared map form.
+     * 从结构总览返回共用地图表单。
+     */
+    private void closeStructureConfig() {
+        isStructureConfiguring = false;
+        isStructureDetailConfiguring = false;
+        structureDeleteConfirmation = false;
+        selectedStructureName = "";
         rebuildWidgets();
     }
 
-    private void closeAdvancedConfig() {
-        syncAdvancedFieldsToMap();
-        isAdvancedConfiguring = false;
+    /**
+     * Opens detailed settings for one uploaded structure.
+     * 打开一个已上传结构的详细设置。
+     *
+     * @param structureName exact structure name / 完整结构名
+     */
+    private void openStructureDetail(String structureName) {
+        selectedStructureName = structureName;
+        isStructureDetailConfiguring = true;
+        structureDeleteConfirmation = false;
         rebuildWidgets();
     }
 
-    private void syncAdvancedFieldsToMap() {
-        MapDefinition map = configuredMap();
-        if (map != null && originXField != null) {
-            map.originX = ScreenHelper.parseInt(originXField.getValue(), "结构原点 X");
-            map.originY = ScreenHelper.parseInt(originYField.getValue(), "结构原点 Y");
-            map.originZ = ScreenHelper.parseInt(originZField.getValue(), "结构原点 Z");
+    /**
+     * Returns from one structure's settings to the structure overview.
+     * 从单个结构设置返回结构总览。
+     */
+    private void closeStructureDetail() {
+        isStructureDetailConfiguring = false;
+        structureDeleteConfirmation = false;
+        selectedStructureName = "";
+        rebuildWidgets();
+    }
+
+    /**
+     * Changes the bounded structure list page.
+     * 切换受限的结构列表页。
+     *
+     * @param delta signed page delta / 有符号页差
+     */
+    private void changeStructurePage(int delta) {
+        int pageCount = Math.max(1, (structures.size() + STRUCTURES_PER_PAGE - 1) / STRUCTURES_PER_PAGE);
+        structurePageIndex = Math.max(0, Math.min(pageCount - 1, structurePageIndex + delta));
+        rebuildWidgets();
+    }
+
+    /**
+     * Saves origin coordinates for the selected structure only.
+     * 仅保存所选结构的原点坐标。
+     *
+     * @return true if saved successfully / 保存成功返回 true
+     */
+    private boolean saveStructureConfiguration() {
+        if (selectedStructure() == null) {
+            return false;
+        }
+        try {
+            ModNetwork.StructureConfigurationForm form = new ModNetwork.StructureConfigurationForm();
+            form.mapId = configuredMapId;
+            form.structureName = selectedStructureName;
+            form.originX = ScreenHelper.parseInt(originXField.getValue(), "结构原点 X");
+            form.originY = ScreenHelper.parseInt(originYField.getValue(), "结构原点 Y");
+            form.originZ = ScreenHelper.parseInt(originZField.getValue(), "结构原点 Z");
+            ScreenHelper.send("save_structure_configuration", form);
+            return true;
+        } catch (IllegalArgumentException exception) {
+            ScreenHelper.message(exception.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Saves structure origin coordinates and returns to structure list.
+     * 保存结构原点坐标并返回结构列表。
+     */
+    private void finishStructureDetail() {
+        if (saveStructureConfiguration()) {
+            closeStructureDetail();
+        }
+    }
+
+    /**
+     * Requires a second click before deleting one structure from the overview.
+     * 从总览删除一个结构前要求再次点击确认。
+     *
+     * @param structureName exact structure name / 完整结构名
+     */
+    private void confirmDeleteStructure(String structureName) {
+        MapDefinition.StructureData structure = structures.stream()
+                .filter(candidate -> candidate.name.equals(structureName))
+                .findFirst()
+                .orElse(null);
+        if (structure == null) {
+            return;
+        }
+        if (!structureDeleteConfirmation || !structureName.equals(selectedStructureName)) {
+            selectedStructureName = structureName;
+            structureDeleteConfirmation = true;
+            rebuildWidgets();
+            return;
+        }
+        ModNetwork.StructureRequest request = new ModNetwork.StructureRequest();
+        request.mapId = configuredMapId;
+        request.structureName = structure.name;
+        selectedStructureName = "";
+        structureDeleteConfirmation = false;
+        ScreenHelper.send("delete_structure", request);
+        rebuildWidgets();
+    }
+
+    /**
+     * Refreshes the local schematic selector used for structure upload.
+     * 刷新用于结构上传的本地蓝图选择器。
+     */
+    private void refreshStructureLabels() {
+        if (schematicButton == null) {
+            return;
+        }
+        if (schematics.isEmpty()) {
+            schematicButton.setMessage(Component.literal("未找到 schematics/*.nbt"));
+        } else {
+            schematicButton.setMessage(Component.literal(
+                    "[" + (schematicIndex + 1) + "/" + schematics.size() + "] "
+                            + schematics.get(schematicIndex).getFileName()
+            ));
         }
     }
 
@@ -506,10 +748,22 @@ public final class MapScreen extends BaseScreen {
             configuredMapId = "";
         }
         MapDefinition map = configuredMap();
-        if (map != null && !map.schematicName.isEmpty()) {
-            for (int index = 0; index < schematics.size(); index++) {
-                if (schematics.get(index).getFileName().toString().equals(map.schematicName)) {
-                    schematicIndex = index;
+        structures = map == null || map.structures == null
+                ? new ArrayList<>()
+                : new ArrayList<>(map.structures);
+        structures.removeIf(java.util.Objects::isNull);
+        structures.sort(Comparator.comparing(structure -> structure.name));
+        int structurePageCount = Math.max(
+                1,
+                (structures.size() + STRUCTURES_PER_PAGE - 1) / STRUCTURES_PER_PAGE
+        );
+        structurePageIndex = Math.max(0, Math.min(structurePageIndex, structurePageCount - 1));
+        if (!selectedStructureName.isEmpty() && selectedStructure() == null) {
+            selectedStructureName = "";
+        } else if (!selectedStructureName.isEmpty()) {
+            for (int index = 0; index < structures.size(); index++) {
+                if (selectedStructureName.equals(structures.get(index).name)) {
+                    structurePageIndex = index / STRUCTURES_PER_PAGE;
                     break;
                 }
             }
@@ -592,7 +846,12 @@ public final class MapScreen extends BaseScreen {
         configuredMapId = selectedMapId;
         isAdvancedConfiguring = false;
         isTerrainConfiguring = false;
+        isStructureConfiguring = false;
+        isStructureDetailConfiguring = false;
         deleteConfirmation = false;
+        structureDeleteConfirmation = false;
+        selectedStructureName = "";
+        structurePageIndex = 0;
         rebuildCollections();
         rebuildWidgets();
     }
@@ -624,22 +883,14 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
-     * Refreshes direction and Create-style scroll selection labels.
-     * 刷新朝向与机械动力风格滚轮选择标签。
+     * Refreshes the player spawn direction label.
+     * 刷新玩家出生朝向标签。
      */
     private void refreshConfigurationLabels() {
-        if (directionButton == null || schematicButton == null) {
+        if (directionButton == null) {
             return;
         }
         directionButton.setMessage(Component.literal("朝向：" + direction.name()));
-        if (schematics.isEmpty()) {
-            schematicButton.setMessage(Component.literal("未找到 schematics/*.nbt"));
-        } else {
-            schematicButton.setMessage(Component.literal(
-                    "[" + (schematicIndex + 1) + "/" + schematics.size() + "] "
-                            + schematics.get(schematicIndex).getFileName()
-            ));
-        }
     }
 
     /**
@@ -657,15 +908,6 @@ public final class MapScreen extends BaseScreen {
         form.direction = direction;
         MapDefinition map = configuredMap();
         if (map != null) {
-            if (originXField != null) {
-                form.originX = ScreenHelper.parseInt(originXField.getValue(), "结构原点 X");
-                form.originY = ScreenHelper.parseInt(originYField.getValue(), "结构原点 Y");
-                form.originZ = ScreenHelper.parseInt(originZField.getValue(), "结构原点 Z");
-            } else {
-                form.originX = map.originX;
-                form.originY = map.originY;
-                form.originZ = map.originZ;
-            }
             if (map.flatLayers != null) {
                 form.flatLayers = new ArrayList<>(map.flatLayers);
             }
@@ -710,8 +952,10 @@ public final class MapScreen extends BaseScreen {
             return;
         }
         try {
-            ClientUploads.upload("SCHEMATIC", configuredMapId, schematics.get(schematicIndex));
-            ScreenHelper.message("蓝图正在上传，完成后只会影响之后新建的编辑维度。");
+            Path schematic = schematics.get(schematicIndex);
+            selectedStructureName = schematic.getFileName().toString();
+            ClientUploads.upload("SCHEMATIC", configuredMapId, schematic);
+            ScreenHelper.message("蓝图正在上传；同名结构会被覆盖，完成后只影响新建的编辑维度。");
         } catch (IOException exception) {
             ScreenHelper.message("蓝图上传失败：" + exception.getMessage());
         }
@@ -759,14 +1003,25 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
+     * Returns the selected structure from the latest synchronized map snapshot.
+     * 从最新同步地图快照中返回所选结构。
+     *
+     * @return selected structure, or {@code null} / 所选结构，不存在时返回 {@code null}
+     */
+    private MapDefinition.StructureData selectedStructure() {
+        return structures.stream()
+                .filter(structure -> structure.name.equals(selectedStructureName))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
      * Handles Create-style wheel selection while hovering the schematic field.
      * 在悬停蓝图字段时处理机械动力风格滚轮选择。
      */
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
-        if (isConfiguring()
-                && !isTerrainConfiguring
-                && !isAdvancedConfiguring
+        if (isStructureConfiguring
                 && schematicButton != null
                 && schematicButton.isMouseOver(mouseX, mouseY)
                 && !schematics.isEmpty()) {
@@ -776,7 +1031,7 @@ public final class MapScreen extends BaseScreen {
             int previous = schematicIndex;
             schematicIndex = Math.max(0, Math.min(schematics.size() - 1, schematicIndex + delta));
             if (previous != schematicIndex) {
-                refreshConfigurationLabels();
+                refreshStructureLabels();
             }
             return true;
         }
@@ -791,7 +1046,13 @@ public final class MapScreen extends BaseScreen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         UITheme.drawBackground(graphics, width, height);
         if (isConfiguring()) {
-            if (isTerrainConfiguring) {
+            if (isStructureConfiguring) {
+                if (isStructureDetailConfiguring) {
+                    renderStructureDetailBackground(graphics);
+                } else {
+                    renderStructureConfigBackground(graphics);
+                }
+            } else if (isTerrainConfiguring) {
                 renderTerrainConfigBackground(graphics);
             } else if (isAdvancedConfiguring) {
                 renderAdvancedConfigBackground(graphics);
@@ -834,30 +1095,80 @@ public final class MapScreen extends BaseScreen {
     private void renderConfigurationBackground(GuiGraphics graphics) {
         int left = width / 2 - 190;
         int top = height / 2 - 125;
-        drawPanel(graphics, left - 18, top - 30, 416, 270);
+        drawPanel(graphics, left - 18, top - 30, 416, 240);
         String heading = isEditing() ? "编辑中配置地图：" : "配置地图：";
         graphics.drawCenteredString(font, heading + configuredMapId, width / 2, top - 20, UITheme.TEXT);
-        graphics.drawString(font, "出生点 X", left, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Y", left + 165, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Z", left + 270, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(
-                font,
-                "蓝图框悬停滚轮选择，Shift + 滚轮每次跳过 5 项",
-                left,
-                top + 210,
-                UITheme.ACCENT,
-                false
-        );
+        graphics.drawString(font, "出生点", left, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "X", left + 65, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Y", left + 170, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Z", left + 275, top + 41, UITheme.TEXT_MUTED, false);
         if (isEditing()) {
             graphics.drawString(
                     font,
                     "仅“保存 NPC”会写入配置；直接退出地图、跨维或登出会丢弃未保存修改",
                     left,
-                    top + 225,
+                    top + 190,
                     UITheme.TEXT_MUTED,
                     false
             );
         }
+    }
+
+    /**
+     * Draws the structure overview containing upload, list, and delete actions.
+     * 绘制包含上传、列表和删除操作的结构总览。
+     *
+     * @param graphics GUI drawing context / GUI 绘制上下文
+     */
+    private void renderStructureConfigBackground(GuiGraphics graphics) {
+        int left = width / 2 - 190;
+        int top = height / 2 - 145;
+        drawPanel(graphics, left - 18, top - 30, 416, 285);
+        graphics.drawCenteredString(font, "配置结构：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
+        graphics.drawString(
+                font,
+                "地图结构（点击结构名配置，结构名与蓝图文件名一致）：",
+                left,
+                top + 5,
+                UITheme.TEXT_MUTED,
+                false
+        );
+        if (structures.isEmpty()) {
+            graphics.drawCenteredString(font, "暂无结构，请从本地 schematics 目录上传蓝图。", width / 2, top + 72, UITheme.TEXT_DIM);
+        }
+        int pageCount = Math.max(1, (structures.size() + STRUCTURES_PER_PAGE - 1) / STRUCTURES_PER_PAGE);
+        graphics.drawCenteredString(
+                font,
+                "第 " + (structurePageIndex + 1) + " / " + pageCount + " 页",
+                width / 2,
+                top + 136,
+                UITheme.TEXT_MUTED
+        );
+        graphics.drawString(
+                font,
+                "悬停蓝图框滚轮选择；上传同名蓝图会覆盖原结构文件",
+                left,
+                top + 182,
+                UITheme.ACCENT,
+                false
+        );
+    }
+
+    /**
+     * Draws detailed configuration labels for one uploaded structure.
+     * 绘制一个已上传结构的详细配置标签。
+     *
+     * @param graphics GUI drawing context / GUI 绘制上下文
+     */
+    private void renderStructureDetailBackground(GuiGraphics graphics) {
+        int left = width / 2 - 190;
+        int top = height / 2 - 100;
+        drawPanel(graphics, left - 18, top - 30, 416, 140);
+        graphics.drawCenteredString(font, "结构配置项：" + selectedStructureName, width / 2, top - 20, UITheme.TEXT);
+        graphics.drawString(font, "结构原点", left, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "X", left + 65, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Y", left + 170, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Z", left + 275, top + 41, UITheme.TEXT_MUTED, false);
     }
 
     /**
@@ -901,9 +1212,6 @@ public final class MapScreen extends BaseScreen {
         int top = height / 2 - 125;
         drawPanel(graphics, left - 18, top - 30, 416, 270);
         graphics.drawCenteredString(font, "高级设置：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
-        graphics.drawString(font, "结构原点 X", left, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Y", left + 165, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Z", left + 270, top + 41, UITheme.TEXT_MUTED, false);
     }
 
     /**

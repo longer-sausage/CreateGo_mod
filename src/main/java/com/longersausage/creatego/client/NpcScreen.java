@@ -173,9 +173,10 @@ public final class NpcScreen extends BaseScreen {
         );
         graphics.drawCenteredString(font, title, width / 2, top - 18, UITheme.TEXT);
         graphics.drawString(font, "名字", left, top + 11, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "绝对 X", left, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Y", left + 165, top + 41, UITheme.TEXT_MUTED, false);
-        graphics.drawString(font, "Z", left + 270, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "绝对坐标", left, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "X", left + 65, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Y", left + 170, top + 41, UITheme.TEXT_MUTED, false);
+        graphics.drawString(font, "Z", left + 275, top + 41, UITheme.TEXT_MUTED, false);
         graphics.drawString(font, "朝向 Yaw", left, top + 71, UITheme.TEXT_MUTED, false);
         super.render(graphics, mouseX, mouseY, partialTick);
     }

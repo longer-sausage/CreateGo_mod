@@ -21,16 +21,24 @@ public final class MapDefinition {
     public int spawnX;
     public int spawnY = 65;
     public int spawnZ;
-    public int originX = CreateGo.ORIGIN_X;
-    public int originY;
-    public int originZ = CreateGo.ORIGIN_Z;
     public Direction direction = Direction.SOUTH;
-    public int sizeX;
-    public int sizeY;
-    public int sizeZ;
-    public String schematicName = "";
+    public List<StructureData> structures = new ArrayList<>();
     public List<NpcData> npcs = new ArrayList<>();
     public List<FlatLayer> flatLayers = new ArrayList<>();
+
+    /**
+     * Stores one named schematic and its independent placement settings.
+     * 保存一个具名蓝图及其独立放置设置。
+     */
+    public static final class StructureData {
+        public String name = "";
+        public int originX = CreateGo.ORIGIN_X;
+        public int originY;
+        public int originZ = CreateGo.ORIGIN_Z;
+        public int sizeX;
+        public int sizeY;
+        public int sizeZ;
+    }
 
     /**
      * Defines configuration for one superflat block layer.

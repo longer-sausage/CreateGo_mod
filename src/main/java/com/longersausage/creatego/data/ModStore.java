@@ -72,14 +72,32 @@ public final class ModStore {
     }
 
     /**
-     * Returns the structure file for a map.
-     * 返回地图的结构文件。
+     * Returns the directory containing every structure owned by a map.
+     * 返回包含地图全部结构的目录。
      *
      * @param mapId normalized map identifier / 规范化地图标识
-     * @return compressed structure path / 压缩结构路径
+     * @return structure directory / 结构目录
      */
-    public Path structureFile(String mapId) {
-        return mapDirectory(mapId).resolve("structure.nbt");
+    public Path structureDirectory(String mapId) {
+        return mapDirectory(mapId).resolve("structures");
+    }
+
+    /**
+     * Resolves one structure file while preventing directory traversal.
+     * 解析一个结构文件，同时阻止目录穿越。
+     *
+     * @param mapId normalized map identifier / 规范化地图标识
+     * @param structureName exact schematic filename / 完整蓝图文件名
+     * @return compressed structure path / 压缩结构路径
+     * @throws IllegalArgumentException when the name escapes the structure directory / 名称越出结构目录时抛出
+     */
+    public Path structureFile(String mapId, String structureName) {
+        Path directory = structureDirectory(mapId).normalize();
+        Path file = directory.resolve(structureName).normalize();
+        if (!file.startsWith(directory) || !directory.equals(file.getParent())) {
+            throw new IllegalArgumentException("结构名称不合法。");
+        }
+        return file;
     }
 
     /**
