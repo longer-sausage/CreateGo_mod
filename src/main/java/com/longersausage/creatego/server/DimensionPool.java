@@ -46,17 +46,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
- * Owns one fresh runtime dimension per active session and never reuses dimension data.
- * 为每个活动会话管理一个全新的运行时维度，并且绝不复用维度数据。
+ * Owns one shared editing session per runtime dimension and never reuses dimension data.
+ * 为每个运行时维度管理一个共享编辑会话，并且绝不复用维度数据。
  */
 public final class DimensionPool {
     private static final Logger LOGGER = LoggerFactory.getLogger(DimensionPool.class);
-    private static final Map<MinecraftServer, Map<UUID, Session>> SESSIONS = new WeakHashMap<>();
+    private static final Map<MinecraftServer, Map<ResourceKey<Level>, Session>> SESSIONS = new WeakHashMap<>();
+    private static final Map<MinecraftServer, Map<UUID, Binding>> BINDINGS = new WeakHashMap<>();
+    private static final Map<MinecraftServer, Map<UUID, PreparedEntry>> PREPARED_ENTRIES = new WeakHashMap<>();
 
     private DimensionPool() {
     }
@@ -70,7 +71,7 @@ public final class DimensionPool {
      * @return allocated session / 已分配会话
      */
     public static synchronized Session allocate(ServerPlayer player, String mapId) {
-        if (sessions(player.server).containsKey(player.getUUID())) {
+        if (activeSession(player) != null) {
             throw new IllegalStateException("请先退出当前地图会话。");
         }
         ResourceLocation dimensionId = CreateGo.id(
@@ -102,44 +103,104 @@ public final class DimensionPool {
                 captureReturnPoint(player),
                 new LinkedHashMap<>()
         );
-        sessions(player.server).put(player.getUUID(), session);
+        sessions(player.server).put(session.dimensionKey(), session);
         LOGGER.info("为玩家 [{}] 分配隔离维度会话 [维度: {}, 地图: {}]", player.getScoreboardName(), dimensionId, mapId);
         return session;
     }
 
     /**
-     * Returns the allocated session even while its dimension is waiting for registration.
-     * 返回已分配会话，即使其维度仍在等待注册。
-     *
-     * @param player target player / 目标玩家
-     * @return session, or {@code null} / 会话，不存在时返回 {@code null}
-     */
-    public static synchronized Session session(ServerPlayer player) {
-        return sessions(player.server).get(player.getUUID());
-    }
-
-    /**
-     * Returns an allocated session by server and player UUID.
-     * 按服务端与玩家 UUID 返回已分配会话。
-     *
-     * @param server running server / 运行中的服务端
-     * @param playerId owner UUID / 所有者 UUID
-     * @return session, or {@code null} / 会话，不存在时返回 {@code null}
-     */
-    public static synchronized Session session(MinecraftServer server, UUID playerId) {
-        return sessions(server).get(playerId);
-    }
-
-    /**
-     * Returns the session only when the player is physically inside its allocated dimension.
-     * 仅当玩家实际位于所分配维度内时返回会话。
+     * Returns the shared session for the dimension the player is physically inside.
+     * 返回玩家实际所在维度的共享会话。
      *
      * @param player target player / 目标玩家
      * @return active session, or {@code null} / 活动会话，不存在时返回 {@code null}
      */
     public static synchronized Session activeSession(ServerPlayer player) {
-        Session session = sessions(player.server).get(player.getUUID());
-        return session != null && player.serverLevel().dimension().equals(session.dimensionKey) ? session : null;
+        return sessions(player.server).get(player.serverLevel().dimension());
+    }
+
+    /**
+     * Captures an exact return point before a player travels into a registered map dimension.
+     * 在玩家前往已注册地图维度前捕获准确返回点。
+     *
+     * @param player traveling player / 正在跨维度的玩家
+     * @param targetDimension requested target dimension / 请求前往的目标维度
+     */
+    public static synchronized void prepareEntry(
+            ServerPlayer player,
+            ResourceKey<Level> targetDimension
+    ) {
+        if (sessions(player.server).containsKey(targetDimension)) {
+            Binding currentBinding = bindings(player.server).get(player.getUUID());
+            ReturnPoint returnPoint = currentBinding == null
+                    ? captureReturnPoint(player)
+                    : currentBinding.returnPoint;
+            preparedEntries(player.server).put(
+                    player.getUUID(),
+                    new PreparedEntry(targetDimension, returnPoint)
+            );
+        } else {
+            preparedEntries(player.server).remove(player.getUUID());
+        }
+    }
+
+    /**
+     * Records a player's binding after the player has entered a map dimension.
+     * 在玩家进入地图维度后记录其绑定。
+     *
+     * @param player entering player / 进入的玩家
+     * @param fromDimension previous dimension used for a safe return destination / 用于安全返回的原维度
+     * @return entered shared session, or {@code null} / 已进入的共享会话，不存在时返回 {@code null}
+     */
+    public static synchronized Session bindOnEntry(
+            ServerPlayer player,
+            ResourceKey<Level> fromDimension
+    ) {
+        Session session = sessions(player.server).get(player.serverLevel().dimension());
+        if (session == null) {
+            bindings(player.server).remove(player.getUUID());
+            preparedEntries(player.server).remove(player.getUUID());
+            return null;
+        }
+        PreparedEntry prepared = preparedEntries(player.server).remove(player.getUUID());
+        Binding existing = bindings(player.server).get(player.getUUID());
+        ReturnPoint returnPoint;
+        if (prepared != null && prepared.dimensionKey.equals(session.dimensionKey)) {
+            returnPoint = prepared.returnPoint;
+        } else if (existing != null) {
+            returnPoint = existing.returnPoint;
+        } else if (session.playerId.equals(player.getUUID())) {
+            returnPoint = session.returnPoint;
+        } else {
+            returnPoint = fallbackReturnPoint(player.server, fromDimension);
+        }
+        bindings(player.server).put(player.getUUID(), new Binding(session.dimensionKey, returnPoint));
+        LOGGER.info(
+                "玩家 [{}] 进入地图维度并绑定共享会话 [维度: {}, 地图: {}]",
+                player.getScoreboardName(),
+                session.dimensionKey.location(),
+                session.mapId
+        );
+        return session;
+    }
+
+    /**
+     * Removes one player's binding to the dimension being left.
+     * 移除玩家对正在离开的维度的绑定。
+     *
+     * @param server running server / 运行中的服务端
+     * @param playerId leaving player UUID / 离开玩家 UUID
+     * @param dimensionKey dimension being left / 正在离开的维度
+     */
+    public static synchronized void unbind(
+            MinecraftServer server,
+            UUID playerId,
+            ResourceKey<Level> dimensionKey
+    ) {
+        Binding binding = bindings(server).get(playerId);
+        if (binding != null && binding.dimensionKey.equals(dimensionKey)) {
+            bindings(server).remove(playerId);
+        }
     }
 
     /**
@@ -178,52 +239,54 @@ public final class DimensionPool {
             MinecraftServer server,
             ResourceKey<Level> dimensionKey
     ) {
-        return sessions(server).values().stream()
-                .filter(session -> session.dimensionKey.equals(dimensionKey))
-                .findFirst()
-                .orElse(null);
+        return sessions(server).get(dimensionKey);
     }
 
     /**
-     * Removes and returns one player's session without touching its runtime dimension.
-     * 移除并返回一个玩家的会话，但不处理其运行时维度。
+     * Removes and returns one shared session without touching its runtime dimension.
+     * 移除并返回一个共享会话，但不处理其运行时维度。
      *
      * @param server running server / 运行中的服务端
-     * @param playerId player UUID / 玩家 UUID
+     * @param dimensionKey runtime dimension key / 运行时维度键
      * @return removed session, or {@code null} / 已移除会话，不存在时返回 {@code null}
      */
-    public static synchronized Session detach(MinecraftServer server, UUID playerId) {
-        return sessions(server).remove(playerId);
+    public static synchronized Session detachDimension(
+            MinecraftServer server,
+            ResourceKey<Level> dimensionKey
+    ) {
+        Session session = sessions(server).get(dimensionKey);
+        if (session != null) {
+            removeSession(server, session);
+        }
+        return session;
     }
 
     /**
-     * Removes and returns every active session for a map.
-     * 移除并返回指定地图的全部活动会话。
+     * Returns every active shared session for a map without changing runtime state.
+     * 返回地图的全部活动共享会话，但不修改运行时状态。
      *
      * @param server running server / 运行中的服务端
      * @param mapId map identifier / 地图标识
-     * @return detached sessions / 已移除会话
+     * @return matching sessions / 匹配会话
      */
-    public static synchronized List<Session> detachMapSessions(MinecraftServer server, String mapId) {
-        List<Session> removed = sessions(server).values().stream()
+    public static synchronized List<Session> sessionsForMap(MinecraftServer server, String mapId) {
+        return sessions(server).values().stream()
                 .filter(session -> session.mapId.equals(mapId))
                 .toList();
-        removed.forEach(session -> sessions(server).remove(session.playerId));
-        return removed;
     }
 
     /**
-     * Teleports an online session owner to the position recorded before allocation.
-     * 将在线会话所有者传送到分配前记录的位置。
+     * Returns a player from the current map to their recorded or safe fallback destination.
+     * 将玩家从当前地图送回其记录位置或安全回退位置。
      *
-     * @param server running server / 运行中的服务端
-     * @param session detached session / 已移除会话
+     * @param player player leaving the map / 离开地图的玩家
      */
-    public static void returnOwner(MinecraftServer server, Session session) {
-        ServerPlayer player = server.getPlayerList().getPlayer(session.playerId);
-        if (player != null) {
-            teleportToReturnPoint(player, session.returnPoint);
-        }
+    public static synchronized void returnPlayer(ServerPlayer player) {
+        Binding binding = bindings(player.server).get(player.getUUID());
+        ReturnPoint returnPoint = binding == null
+                ? fallbackReturnPoint(player.server, Level.OVERWORLD)
+                : binding.returnPoint;
+        teleportToReturnPoint(player, returnPoint);
     }
 
     /**
@@ -261,8 +324,8 @@ public final class DimensionPool {
     }
 
     /**
-     * Checks if a dynamic dimension has 0 remaining players and deletes it and unbinds session if empty.
-     * 检查动态维度是否已无玩家停留；若已空则解绑会话并彻底销毁维度。
+     * Deletes an empty registered map dimension and clears all bindings to it.
+     * 删除已清空的注册地图维度，并清除其全部绑定。
      *
      * @param server running server / 运行中的服务端
      * @param dimensionKey target dimension key / 目标维度键
@@ -273,58 +336,52 @@ public final class DimensionPool {
             ResourceKey<Level> dimensionKey,
             UUID leavingPlayerId
     ) {
-        if (dimensionKey == null || !dimensionKey.location().getNamespace().equals(CreateGo.MOD_ID)) {
+        if (dimensionKey == null) {
+            return;
+        }
+        Session session = sessionForDimension(server, dimensionKey);
+        if (session == null) {
             return;
         }
         ServerLevel level = server.getLevel(dimensionKey);
         if (level == null) {
-            Session session = sessionForDimension(server, dimensionKey);
-            if (session != null) {
-                detach(server, session.playerId());
-            }
+            removeSession(server, session);
+            deleteDimension(server, dimensionKey);
             return;
         }
         long remainingPlayers = level.players().stream()
                 .filter(p -> leavingPlayerId == null || !p.getUUID().equals(leavingPlayerId))
                 .count();
         if (remainingPlayers == 0) {
-            Session session = sessionForDimension(server, dimensionKey);
-            if (session != null) {
-                detach(server, session.playerId());
-                LOGGER.info("隔离维度 [{}] 已空，解绑所有者 [{}] 的地图会话", dimensionKey.location(), session.playerId());
-            }
+            removeSession(server, session);
             LOGGER.info("隔离维度 [{}] 内已无任何残留玩家，执行彻底销毁", dimensionKey.location());
             deleteDimension(server, dimensionKey);
         }
     }
 
     /**
-     * Ejects all remaining players from a dynamic dimension back to the overworld spawn.
-     * 将动态维度中残留的所有玩家强制驱逐并送回主世界出生点。
+     * Ejects all remaining players from a map dimension to their individual return destinations.
+     * 将地图维度中残留的所有玩家送回各自的返回位置。
      *
      * @param server running server / 运行中的服务端
      * @param dimensionKey target dimension key / 目标维度键
      */
     public static void ejectAllPlayers(MinecraftServer server, ResourceKey<Level> dimensionKey) {
         ServerLevel level = server.getLevel(dimensionKey);
-        if (level == null || level.players().isEmpty()) {
+        if (level == null) {
+            clearBindings(server, dimensionKey);
             return;
         }
-        ServerLevel overworld = server.overworld();
-        BlockPos spawn = overworld.getSharedSpawnPos();
         List<ServerPlayer> players = new java.util.ArrayList<>(level.players());
         for (ServerPlayer player : players) {
             LOGGER.info("强制驱逐玩家 [{}] 离开隔离维度 [{}]", player.getScoreboardName(), dimensionKey.location());
-            player.teleportTo(
-                    overworld,
-                    spawn.getX() + 0.5D,
-                    spawn.getY(),
-                    spawn.getZ() + 0.5D,
-                    java.util.Set.of(),
-                    overworld.getSharedSpawnAngle(),
-                    0.0F
-            );
+            Binding binding = binding(server, player.getUUID(), dimensionKey);
+            ReturnPoint returnPoint = binding == null
+                    ? fallbackReturnPoint(server, Level.OVERWORLD)
+                    : binding.returnPoint;
+            teleportToReturnPoint(player, returnPoint);
         }
+        clearBindings(server, dimensionKey);
     }
 
     /**
@@ -664,8 +721,102 @@ public final class DimensionPool {
      * @param server running server / 运行中的服务端
      * @return server session table / 服务端会话表
      */
-    private static Map<UUID, Session> sessions(MinecraftServer server) {
+    private static Map<ResourceKey<Level>, Session> sessions(MinecraftServer server) {
         return SESSIONS.computeIfAbsent(server, ignored -> new HashMap<>());
+    }
+
+    /**
+     * Returns the mutable player-binding table for one server.
+     * 返回指定服务端的可变玩家绑定表。
+     *
+     * @param server running server / 运行中的服务端
+     * @return server binding table / 服务端绑定表
+     */
+    private static Map<UUID, Binding> bindings(MinecraftServer server) {
+        return BINDINGS.computeIfAbsent(server, ignored -> new HashMap<>());
+    }
+
+    /**
+     * Returns the pre-travel return-point table for one server.
+     * 返回指定服务端的跨维度前返回点表。
+     *
+     * @param server running server / 运行中的服务端
+     * @return prepared-entry table / 预备进入表
+     */
+    private static Map<UUID, PreparedEntry> preparedEntries(MinecraftServer server) {
+        return PREPARED_ENTRIES.computeIfAbsent(server, ignored -> new HashMap<>());
+    }
+
+    /**
+     * Finds a player's binding only when it targets the expected dimension.
+     * 仅当玩家绑定指向预期维度时返回该绑定。
+     *
+     * @param server running server / 运行中的服务端
+     * @param playerId player UUID / 玩家 UUID
+     * @param dimensionKey expected dimension / 预期维度
+     * @return matching binding, or {@code null} / 匹配绑定，不存在时返回 {@code null}
+     */
+    private static synchronized Binding binding(
+            MinecraftServer server,
+            UUID playerId,
+            ResourceKey<Level> dimensionKey
+    ) {
+        Binding binding = bindings(server).get(playerId);
+        return binding != null && binding.dimensionKey.equals(dimensionKey) ? binding : null;
+    }
+
+    /**
+     * Removes a session and every stale player binding that points to its dimension.
+     * 移除会话以及所有指向其维度的过期玩家绑定。
+     *
+     * @param server running server / 运行中的服务端
+     * @param session removed session / 待移除会话
+     */
+    private static synchronized void removeSession(MinecraftServer server, Session session) {
+        sessions(server).remove(session.dimensionKey);
+        clearBindings(server, session.dimensionKey);
+        preparedEntries(server).values().removeIf(entry -> entry.dimensionKey.equals(session.dimensionKey));
+    }
+
+    /**
+     * Clears every binding targeting one dimension.
+     * 清除所有指向指定维度的绑定。
+     *
+     * @param server running server / 运行中的服务端
+     * @param dimensionKey target dimension / 目标维度
+     */
+    private static synchronized void clearBindings(
+            MinecraftServer server,
+            ResourceKey<Level> dimensionKey
+    ) {
+        bindings(server).values().removeIf(binding -> binding.dimensionKey.equals(dimensionKey));
+    }
+
+    /**
+     * Builds a safe return point at the requested dimension's shared spawn.
+     * 在请求维度的共享出生点构建安全返回点。
+     *
+     * @param server running server / 运行中的服务端
+     * @param requestedDimension preferred return dimension / 首选返回维度
+     * @return safe return point / 安全返回点
+     */
+    private static ReturnPoint fallbackReturnPoint(
+            MinecraftServer server,
+            ResourceKey<Level> requestedDimension
+    ) {
+        ServerLevel level = server.getLevel(requestedDimension);
+        if (level == null || sessionForDimension(server, requestedDimension) != null) {
+            level = server.overworld();
+        }
+        BlockPos spawn = level.getSharedSpawnPos();
+        return new ReturnPoint(
+                level.dimension(),
+                spawn.getX() + 0.5D,
+                spawn.getY(),
+                spawn.getZ() + 0.5D,
+                level.getSharedSpawnAngle(),
+                0.0F
+        );
     }
 
     /**
@@ -705,6 +856,32 @@ public final class DimensionPool {
             double z,
             float yaw,
             float pitch
+    ) {
+    }
+
+    /**
+     * Stores one player's dimension binding and safe return destination.
+     * 保存一个玩家的维度绑定及安全返回位置。
+     *
+     * @param dimensionKey bound map dimension / 已绑定地图维度
+     * @param returnPoint destination used by explicit exit / 主动退出时使用的返回位置
+     */
+    private record Binding(
+            ResourceKey<Level> dimensionKey,
+            ReturnPoint returnPoint
+    ) {
+    }
+
+    /**
+     * Stores an exact return point captured before cross-dimension travel completes.
+     * 保存跨维度传送完成前捕获的准确返回点。
+     *
+     * @param dimensionKey intended map dimension / 目标地图维度
+     * @param returnPoint captured source position / 已捕获来源位置
+     */
+    private record PreparedEntry(
+            ResourceKey<Level> dimensionKey,
+            ReturnPoint returnPoint
     ) {
     }
 }

@@ -14,6 +14,7 @@ import com.longersausage.creatego.server.DimensionPool;
 import com.longersausage.creatego.server.ModService;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.event.entity.EntityTravelToDimensionEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
@@ -39,7 +40,21 @@ public final class ServerEvents {
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             LOGGER.debug("玩家 [{}] 登录，同步模组数据状态", player.getScoreboardName());
+            DimensionPool.bindOnEntry(player, net.minecraft.world.level.Level.OVERWORLD);
             ModNetwork.syncState(player);
+        }
+    }
+
+    /**
+     * Captures the exact source position before any cross-dimension map entry.
+     * 在以任意方式跨维度进入地图前捕获准确来源位置。
+     *
+     * @param event pre-travel event / 跨维度前事件
+     */
+    @SubscribeEvent
+    public static void onEntityTravelToDimension(EntityTravelToDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            DimensionPool.prepareEntry(player, event.getDimension());
         }
     }
 
@@ -62,8 +77,8 @@ public final class ServerEvents {
     }
 
     /**
-     * Handles dialogue cleanup and dimension deletion checks whenever a player leaves a map dimension.
-     * 玩家通过任意方式离开地图维度时清理对话，并检查维度是否清空以触发销毁与解绑。
+     * Binds after entering and cleans up after leaving a shared map dimension by any route.
+     * 玩家以任意方式进入共享地图维度后绑定，并在离开后执行清理。
      *
      * @param event dimension-change event / 维度切换事件
      */
@@ -72,12 +87,14 @@ public final class ServerEvents {
         if (event.getEntity() instanceof ServerPlayer player) {
             net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> fromDimension = event.getFrom();
             DialogueRuntime.stop(player);
-            DimensionPool.Session session = DimensionPool.session(player);
-            if (session != null && session.dimensionKey().equals(fromDimension)) {
+            DimensionPool.Session fromSession = DimensionPool.sessionForDimension(player.server, fromDimension);
+            DimensionPool.Session enteredSession = DimensionPool.bindOnEntry(player, fromDimension);
+            if (fromSession != null && !fromDimension.equals(player.serverLevel().dimension())) {
                 LOGGER.info("玩家 [{}] 离开地图维度 [{}]", player.getScoreboardName(), fromDimension.location());
-                ModService.closeSession(player, false);
-            } else {
                 DimensionPool.checkAndCleanupDimension(player.server, fromDimension, player.getUUID());
+            }
+            if (enteredSession != null || fromSession != null) {
+                ModNetwork.syncState(player);
             }
         }
     }
@@ -91,10 +108,7 @@ public final class ServerEvents {
     @SubscribeEvent
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            DimensionPool.Session session = DimensionPool.session(player);
-            if (session != null && !player.serverLevel().dimension().equals(session.dimensionKey())) {
-                ModService.closeSession(player, false);
-            }
+            DimensionPool.bindOnEntry(player, net.minecraft.world.level.Level.OVERWORLD);
             ModNetwork.syncState(player);
         }
     }

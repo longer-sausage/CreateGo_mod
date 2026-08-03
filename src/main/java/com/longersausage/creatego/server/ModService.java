@@ -398,7 +398,7 @@ public final class ModService {
         for (int index = entries.size() - 1; index >= 0; index--) {
             PendingEntry pending = entries.get(index);
             ServerPlayer player = server.getPlayerList().getPlayer(pending.playerId);
-            DimensionPool.Session session = DimensionPool.session(server, pending.playerId);
+            DimensionPool.Session session = DimensionPool.sessionForDimension(server, pending.dimensionKey);
             if (player == null) {
                 entries.remove(index);
                 if (session != null) {
@@ -415,7 +415,8 @@ public final class ModService {
                 pending.attempts++;
                 if (pending.attempts > 200) {
                     entries.remove(index);
-                    DimensionPool.detach(server, pending.playerId);
+                    DimensionPool.detachDimension(server, pending.dimensionKey);
+                    DimensionPool.deleteDimension(server, pending.dimensionKey);
                     ModNetwork.error(player, "动态维度注册超时。");
                 }
                 continue;
@@ -424,15 +425,17 @@ public final class ModService {
             try {
                 populateSession(player, level, session);
             } catch (Exception exception) {
-                DimensionPool.detach(server, pending.playerId);
+                DimensionPool.detachDimension(server, pending.dimensionKey);
                 DimensionPool.deleteDimension(server, session.dimensionKey());
                 ModNetwork.error(player, "地图加载失败：" + exception.getMessage());
             }
         }
         // Keep every physical structure resident so a later explicit save can capture distant structures too.
         // 保持全部物理结构驻留，使之后的显式保存也能捕获远处结构。
+        Set<net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level>> loadedDimensions = new HashSet<>();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            if (DimensionPool.activeSession(player) != null) {
+            DimensionPool.Session session = DimensionPool.activeSession(player);
+            if (session != null && loadedDimensions.add(session.dimensionKey())) {
                 MapPhysicalStructureStorage.keepLoaded(player.serverLevel());
             }
         }
@@ -504,24 +507,34 @@ public final class ModService {
     }
 
     /**
-     * Handles player session exit or dimension exit without unbinding unless dimension becomes empty.
-     * 处理玩家离开地图会话或传送出维度；若维度内还有其他玩家则保持绑定，直到维度变空才彻底解绑与销毁。
+     * Handles an explicit exit or logout without ending the shared session for remaining players.
+     * 处理主动退出或登出，同时为仍在维度中的玩家保留共享会话。
      *
-     * @param player session owner / 会话所有者
-     * @param returnOwner whether to return the online owner / 是否送回在线所有者
+     * @param player leaving player / 离开的玩家
+     * @param returnPlayer whether to return the player before cleanup / 是否在清理前送回玩家
      */
-    public static void closeSession(ServerPlayer player, boolean returnOwner) {
-        DimensionPool.Session session = DimensionPool.session(player);
+    public static void closeSession(ServerPlayer player, boolean returnPlayer) {
+        DimensionPool.Session session = DimensionPool.activeSession(player);
         if (session == null) {
+            PendingEntry pending = pendingEntries(player.server).stream()
+                    .filter(entry -> entry.playerId.equals(player.getUUID()))
+                    .findFirst()
+                    .orElse(null);
+            if (pending != null) {
+                removePendingEntry(player.server, pending.dimensionKey);
+                DimensionPool.detachDimension(player.server, pending.dimensionKey);
+                DimensionPool.deleteDimension(player.server, pending.dimensionKey);
+            }
             return;
         }
         removePendingEntry(player.server, session.dimensionKey());
-        if (returnOwner) {
-            DimensionPool.returnOwner(player.server, session);
+        if (returnPlayer) {
+            DimensionPool.returnPlayer(player);
         }
         LOGGER.info("玩家 [{}] 离开地图维度活动状态 [地图 ID: {}]", player.getScoreboardName(), session.mapId());
         ModNetwork.broadcastState(player);
         ModNetwork.send(player, "close_screen", "{}");
+        DimensionPool.unbind(player.server, player.getUUID(), session.dimensionKey());
         DimensionPool.checkAndCleanupDimension(player.server, session.dimensionKey(), player.getUUID());
     }
 
@@ -531,7 +544,7 @@ public final class ModService {
      */
     private static void deleteMap(ServerPlayer player, String rawMapId) throws IOException {
         String mapId = normalizeMapId(rawMapId);
-        DimensionPool.Session requesterSession = DimensionPool.session(player);
+        DimensionPool.Session requesterSession = DimensionPool.activeSession(player);
         if (requesterSession != null && !requesterSession.mapId().equals(mapId)) {
             throw new IllegalArgumentException("不能在会话中删除其他地图。");
         }
@@ -539,11 +552,12 @@ public final class ModService {
         if (!store.state().maps.containsKey(mapId)) {
             throw new IllegalArgumentException("地图不存在。");
         }
-        for (DimensionPool.Session session : DimensionPool.detachMapSessions(player.server, mapId)) {
+        for (DimensionPool.Session session : DimensionPool.sessionsForMap(player.server, mapId)) {
             removePendingEntry(player.server, session.dimensionKey());
-            DimensionPool.returnOwner(player.server, session);
             DimensionPool.ejectAllPlayers(player.server, session.dimensionKey());
-            DimensionPool.deleteDimension(player.server, session.dimensionKey());
+            if (DimensionPool.detachDimension(player.server, session.dimensionKey()) != null) {
+                DimensionPool.deleteDimension(player.server, session.dimensionKey());
+            }
         }
         store.deleteMapDirectory(mapId);
         store.state().maps.remove(mapId);
@@ -798,7 +812,9 @@ public final class ModService {
      * @param player requesting player / 请求玩家
      */
     private static void requireNotInMapSession(ServerPlayer player) {
-        if (DimensionPool.session(player) != null) {
+        boolean pending = pendingEntries(player.server).stream()
+                .anyMatch(entry -> entry.playerId.equals(player.getUUID()));
+        if (DimensionPool.activeSession(player) != null || pending) {
             throw new IllegalArgumentException("请先退出当前地图。");
         }
     }
