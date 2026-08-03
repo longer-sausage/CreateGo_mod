@@ -12,6 +12,7 @@ import com.longersausage.creatego.entity.NpcEntity;
 import com.longersausage.creatego.item.FourthDimensionalPocketItem;
 import com.longersausage.creatego.item.MapEditorItem;
 import com.longersausage.creatego.item.NpcEditorItem;
+import com.longersausage.creatego.item.LevelEditorItem;
 import com.longersausage.creatego.network.ModNetwork;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
@@ -50,6 +51,10 @@ public final class CreateGo {
     public static final DeferredHolder<Item, NpcEditorItem> NPC_EDITOR_ITEM = ITEMS.register(
             "npc_editor",
             () -> new NpcEditorItem(new Item.Properties().stacksTo(1))
+    );
+    public static final DeferredHolder<Item, LevelEditorItem> LEVEL_EDITOR_ITEM = ITEMS.register(
+            "level_editor",
+            () -> new LevelEditorItem(new Item.Properties().stacksTo(1))
     );
     public static final DeferredHolder<Item, FourthDimensionalPocketItem> FOURTH_DIMENSIONAL_POCKET_ITEM = ITEMS.register(
             "fourth_dimensional_pocket",

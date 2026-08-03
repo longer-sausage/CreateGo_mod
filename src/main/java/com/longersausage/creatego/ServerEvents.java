@@ -12,6 +12,7 @@ import com.longersausage.creatego.network.ModNetwork;
 import com.longersausage.creatego.server.DialogueRuntime;
 import com.longersausage.creatego.server.DimensionPool;
 import com.longersausage.creatego.server.ModService;
+import com.longersausage.creatego.server.LevelRuntime;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.EntityTravelToDimensionEvent;
@@ -87,6 +88,7 @@ public final class ServerEvents {
         if (event.getEntity() instanceof ServerPlayer player) {
             net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> fromDimension = event.getFrom();
             DialogueRuntime.stop(player);
+            LevelRuntime.discard(player);
             DimensionPool.Session fromSession = DimensionPool.sessionForDimension(player.server, fromDimension);
             DimensionPool.Session enteredSession = DimensionPool.bindOnEntry(player, fromDimension);
             if (fromSession != null && !fromDimension.equals(player.serverLevel().dimension())) {
@@ -122,5 +124,6 @@ public final class ServerEvents {
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         ModService.tickPendingEntries(event.getServer());
+        LevelRuntime.tick(event.getServer());
     }
 }

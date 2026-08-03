@@ -28,6 +28,8 @@ public final class ClientController {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClientController.class);
 
     private static ModState clientState = new ModState();
+    private static ModNetwork.LevelPlayStatus levelPlayStatus;
+    private static long levelResultExpiresAt;
 
     private ClientController() {
     }
@@ -68,6 +70,24 @@ public final class ClientController {
                     minecraft.setScreen(new NpcScreen(view.npc, view.skins == null ? java.util.List.of() : view.skins));
                 }
             }
+            case "open_level_editor" -> {
+                ModNetwork.LevelEditorView view = ModStore.fromJson(payload.json(), ModNetwork.LevelEditorView.class);
+                if (view != null) {
+                    minecraft.setScreen(new LevelEditorScreen(view));
+                }
+            }
+            case "open_level_restrictions" -> {
+                ModNetwork.LevelEditorView view = ModStore.fromJson(payload.json(), ModNetwork.LevelEditorView.class);
+                if (view != null && view.level != null) {
+                    minecraft.setScreen(new LevelRestrictionScreen(view));
+                }
+            }
+            case "level_play_status" -> {
+                levelPlayStatus = ModStore.fromJson(payload.json(), ModNetwork.LevelPlayStatus.class);
+                if (levelPlayStatus != null && !levelPlayStatus.active) {
+                    levelResultExpiresAt = System.currentTimeMillis() + 4000L;
+                }
+            }
             case "dialogue_view" -> DialogueScreen.open(
                     ModStore.fromJson(payload.json(), DialogueRuntime.DialogueView.class)
             );
@@ -99,6 +119,19 @@ public final class ClientController {
      */
     public static ModState state() {
         return clientState;
+    }
+
+    /**
+     * Returns the current level HUD state, including a short-lived final result.
+     * 返回当前关卡 HUD 状态，包括短暂保留的最终结果。
+     *
+     * @return current status or {@code null} / 当前状态，不存在时返回 {@code null}
+     */
+    public static ModNetwork.LevelPlayStatus levelPlayStatus() {
+        if (levelPlayStatus != null && !levelPlayStatus.active && System.currentTimeMillis() > levelResultExpiresAt) {
+            levelPlayStatus = null;
+        }
+        return levelPlayStatus;
     }
 
     /**

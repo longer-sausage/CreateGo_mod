@@ -27,6 +27,7 @@ public final class MapDefinition {
     public List<StructureData> structures = new ArrayList<>();
     public List<NpcData> npcs = new ArrayList<>();
     public List<FlatLayer> flatLayers = new ArrayList<>();
+    public LevelDefinition level;
 
     /**
      * Stores one named schematic and its independent placement settings.

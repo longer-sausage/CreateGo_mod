@@ -11,6 +11,8 @@ package com.longersausage.creatego.client;
 import com.longersausage.creatego.CreateGo;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
+import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
 
 /**
  * Isolates client classes from dedicated-server class loading.
@@ -28,6 +30,7 @@ public final class ClientModEvents {
      */
     public static void register(IEventBus modBus) {
         modBus.addListener(ClientModEvents::registerRenderers);
+        modBus.addListener(ClientModEvents::registerGuiLayers);
     }
 
     /**
@@ -38,5 +41,19 @@ public final class ClientModEvents {
      */
     private static void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {
         event.registerEntityRenderer(CreateGo.NPC_ENTITY.get(), NpcRenderer::new);
+    }
+
+    /**
+     * Registers the unobtrusive level progress HUD above vanilla overlays.
+     * 在原版覆盖层上方注册不遮挡视线的关卡进度 HUD。
+     *
+     * @param event GUI layer registration event / GUI 图层注册事件
+     */
+    private static void registerGuiLayers(RegisterGuiLayersEvent event) {
+        event.registerAbove(
+                VanillaGuiLayers.BOSS_OVERLAY,
+                CreateGo.id("level_progress"),
+                LevelHud::render
+        );
     }
 }

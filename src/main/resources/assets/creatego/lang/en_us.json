@@ -1,6 +1,7 @@
 {
   "item.creatego.map_editor": "Map Editor",
   "item.creatego.npc_editor": "NPC Editor",
+  "item.creatego.level_editor": "Level Editor",
   "item.creatego.fourth_dimensional_pocket": "Fourth-Dimensional Pocket",
   "tooltip.creatego.fourth_dimensional_pocket.empty": "Storage: Empty",
   "tooltip.creatego.fourth_dimensional_pocket.stored": "Storage: %s",

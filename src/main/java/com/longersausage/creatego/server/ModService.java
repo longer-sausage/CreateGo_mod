@@ -11,6 +11,7 @@ package com.longersausage.creatego.server;
 import com.longersausage.creatego.CreateGo;
 import com.longersausage.creatego.data.DialogueGraph;
 import com.longersausage.creatego.data.MapDefinition;
+import com.longersausage.creatego.data.LevelDefinition;
 import com.longersausage.creatego.data.ModState;
 import com.longersausage.creatego.data.ModStore;
 import com.longersausage.creatego.data.NpcData;
@@ -99,6 +100,23 @@ public final class ModService {
                         ModStore.fromJson(json, ModNetwork.StructureRequest.class)
                 );
                 case "save_map_contents" -> saveMapContents(player);
+                case "register_level" -> registerLevel(player);
+                case "save_level" -> saveLevel(
+                        player,
+                        ModStore.fromJson(json, ModNetwork.LevelEditorView.class),
+                        false
+                );
+                case "save_level_restrictions" -> saveLevel(
+                        player,
+                        ModStore.fromJson(json, ModNetwork.LevelEditorView.class),
+                        true
+                );
+                case "delete_level" -> deleteLevel(player);
+                case "start_level_simulation" -> startLevelSimulation(
+                        player,
+                        ModStore.fromJson(json, ModNetwork.LevelEditorView.class)
+                );
+                case "stop_level_simulation" -> LevelRuntime.stop(player);
                 case "save_npc" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "save_dialogue" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "delete_npc" -> deleteNpc(player, UUID.fromString(
@@ -439,6 +457,99 @@ public final class ModService {
                 MapPhysicalStructureStorage.keepLoaded(player.serverLevel());
             }
         }
+    }
+
+    /**
+     * Registers the player's currently bound map as a playable level.
+     * 将玩家当前绑定的地图注册为可游玩关卡。
+     *
+     * @param player requesting operator / 请求管理员
+     * @throws IOException when persistent state cannot be written / 持久状态无法写入时抛出
+     */
+    private static void registerLevel(ServerPlayer player) throws IOException {
+        MapDefinition map = requireBoundMap(player);
+        if (map.level != null) {
+            throw new IllegalArgumentException("当前地图已经注册为关卡。");
+        }
+        map.level = LevelDefinition.createDefault();
+        ModStore.get(player.server).save();
+        LOGGER.info("玩家 [{}] 将地图注册为关卡 [地图: {}]", player.getScoreboardName(), map.id);
+        ModNetwork.broadcastState(player);
+        ModNetwork.openLevelEditor(player);
+    }
+
+    /**
+     * Validates and saves all editable settings of the bound level.
+     * 验证并保存绑定关卡的全部可编辑设置。
+     *
+     * @param player requesting operator / 请求管理员
+     * @param view complete editor document / 完整编辑器文档
+     * @param reopenRestrictions whether to return to the restriction list / 是否返回限制规则列表
+     * @throws IOException when persistent state cannot be written / 持久状态无法写入时抛出
+     */
+    private static void saveLevel(
+            ServerPlayer player,
+            ModNetwork.LevelEditorView view,
+            boolean reopenRestrictions
+    ) throws IOException {
+        MapDefinition map = requireBoundMap(player);
+        if (view == null || !map.id.equals(view.mapId) || view.level == null) {
+            throw new IllegalArgumentException("关卡配置与当前绑定地图不一致。");
+        }
+        LevelConditionEvaluator.validate(view.level);
+        map.level = ModStore.fromJson(ModStore.toJson(view.level), LevelDefinition.class);
+        ModStore.get(player.server).save();
+        LOGGER.info("玩家 [{}] 保存关卡配置 [地图: {}, 时限: {} 秒]", player.getScoreboardName(), map.id, map.level.timeLimitSeconds);
+        ModNetwork.broadcastState(player);
+        if (reopenRestrictions) {
+            ModNetwork.send(
+                    player,
+                    "open_level_restrictions",
+                    ModStore.toJson(new ModNetwork.LevelEditorView(map.id, map.level))
+            );
+        } else {
+            ModNetwork.openLevelEditor(player);
+        }
+    }
+
+    /**
+     * Deletes only the level rules while preserving the underlying map.
+     * 仅删除关卡规则并保留底层地图。
+     *
+     * @param player requesting operator / 请求管理员
+     * @throws IOException when persistent state cannot be written / 持久状态无法写入时抛出
+     */
+    private static void deleteLevel(ServerPlayer player) throws IOException {
+        MapDefinition map = requireBoundMap(player);
+        if (map.level == null) {
+            throw new IllegalArgumentException("当前地图尚未注册为关卡。");
+        }
+        LevelRuntime.stop(player);
+        map.level = null;
+        ModStore.get(player.server).save();
+        LOGGER.info("玩家 [{}] 删除关卡配置 [地图: {}]", player.getScoreboardName(), map.id);
+        ModNetwork.broadcastState(player);
+        ModNetwork.openLevelEditor(player);
+    }
+
+    /**
+     * Saves the latest editor document and starts simulation without reopening a screen.
+     * 保存最新编辑器文档并启动模拟，且不重新打开界面。
+     *
+     * @param player requesting operator / 请求管理员
+     * @param view complete editor document / 完整编辑器文档
+     * @throws IOException when persistent state cannot be written / 持久状态无法写入时抛出
+     */
+    private static void startLevelSimulation(ServerPlayer player, ModNetwork.LevelEditorView view) throws IOException {
+        MapDefinition map = requireBoundMap(player);
+        if (view == null || !map.id.equals(view.mapId) || view.level == null) {
+            throw new IllegalArgumentException("关卡配置与当前绑定地图不一致。");
+        }
+        LevelConditionEvaluator.validate(view.level);
+        map.level = ModStore.fromJson(ModStore.toJson(view.level), LevelDefinition.class);
+        ModStore.get(player.server).save();
+        LOGGER.info("玩家 [{}] 保存配置并请求模拟关卡 [地图: {}]", player.getScoreboardName(), map.id);
+        LevelRuntime.start(player);
     }
 
     /**

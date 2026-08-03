@@ -10,12 +10,14 @@ package com.longersausage.creatego.network;
 
 import com.longersausage.creatego.client.ClientController;
 import com.longersausage.creatego.data.MapDefinition;
+import com.longersausage.creatego.data.LevelDefinition;
 import com.longersausage.creatego.data.ModState;
 import com.longersausage.creatego.data.ModStore;
 import com.longersausage.creatego.data.NpcData;
 import com.longersausage.creatego.entity.NpcEntity;
 import com.longersausage.creatego.server.DialogueRuntime;
 import com.longersausage.creatego.server.DimensionPool;
+import com.longersausage.creatego.server.LevelConditionEvaluator;
 import com.longersausage.creatego.server.ModService;
 import com.longersausage.creatego.server.UploadManager;
 import net.minecraft.server.level.ServerPlayer;
@@ -228,6 +230,17 @@ public final class ModNetwork {
     }
 
     /**
+     * Opens the level editor for the player's currently bound map.
+     * 为玩家当前绑定的地图打开关卡编辑器。
+     *
+     * @param player target operator / 目标管理员
+     */
+    public static void openLevelEditor(ServerPlayer player) {
+        MapDefinition map = ModService.requireBoundMap(player);
+        send(player, "open_level_editor", ModStore.toJson(new LevelEditorView(map.id, map.level)));
+    }
+
+    /**
      * Defines one structure placement update.
      * 定义一个结构放置设置更新。
      */
@@ -318,6 +331,55 @@ public final class ModNetwork {
         public NpcEditorView(NpcData npc, java.util.List<String> skins) {
             this.npc = npc;
             this.skins = skins;
+        }
+    }
+
+    /**
+     * Defines the complete level editor payload for one bound map.
+     * 定义一张绑定地图的完整关卡编辑器载荷。
+     */
+    public static final class LevelEditorView {
+        public String mapId = "";
+        public LevelDefinition level;
+
+        public LevelEditorView() {
+        }
+
+        public LevelEditorView(String mapId, LevelDefinition level) {
+            this.mapId = mapId;
+            this.level = level;
+        }
+    }
+
+    /**
+     * Defines one server-authoritative play-state update for the HUD.
+     * 定义一条供 HUD 使用的服务端权威游玩状态更新。
+     */
+    public static final class LevelPlayStatus {
+        public boolean active;
+        public String result = "";
+        public int remainingTicks;
+        public int totalTicks;
+        public boolean completionMatched;
+        public java.util.List<LevelConditionEvaluator.Progress> progress = java.util.List.of();
+
+        public LevelPlayStatus() {
+        }
+
+        public LevelPlayStatus(
+                boolean active,
+                String result,
+                int remainingTicks,
+                int totalTicks,
+                boolean completionMatched,
+                java.util.List<LevelConditionEvaluator.Progress> progress
+        ) {
+            this.active = active;
+            this.result = result;
+            this.remainingTicks = remainingTicks;
+            this.totalTicks = totalTicks;
+            this.completionMatched = completionMatched;
+            this.progress = progress;
         }
     }
 }
