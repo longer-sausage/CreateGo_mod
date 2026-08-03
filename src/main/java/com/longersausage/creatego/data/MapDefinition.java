@@ -22,6 +22,8 @@ public final class MapDefinition {
     public int spawnY = 65;
     public int spawnZ;
     public Direction direction = Direction.SOUTH;
+    public TerrainType terrainType = TerrainType.FLAT;
+    public long terrainSeed;
     public List<StructureData> structures = new ArrayList<>();
     public List<NpcData> npcs = new ArrayList<>();
     public List<FlatLayer> flatLayers = new ArrayList<>();
@@ -81,5 +83,16 @@ public final class MapDefinition {
         Direction(float yaw) {
             this.yaw = yaw;
         }
+    }
+
+    /**
+     * Enumerates the supported isolated-dimension terrain generators.
+     * 枚举隔离维度支持的地形生成器。
+     */
+    public enum TerrainType {
+        VOID,
+        FLAT,
+        OVERWORLD,
+        NETHER
     }
 }

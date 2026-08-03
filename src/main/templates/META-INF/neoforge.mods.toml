@@ -11,6 +11,9 @@ description='''
 CreateGo Mod
 '''
 
+[[mixins]]
+config="creatego.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"

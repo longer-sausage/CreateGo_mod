@@ -368,8 +368,8 @@ public final class ModService {
     }
 
     /**
-     * Allocates a fresh empty dimension and queues structure and NPC population.
-     * 分配全新空白维度，并将结构与 NPC 生成加入队列。
+     * Allocates a fresh terrain dimension and queues structure and NPC population.
+     * 分配全新地形维度，并将结构与 NPC 生成加入队列。
      */
     private static void loadMap(ServerPlayer player, String rawMapId) {
         requireNotInMapSession(player);
@@ -383,7 +383,7 @@ public final class ModService {
         ModNetwork.send(
                 player,
                 "notice",
-                ModStore.toJson(new ModNetwork.MessageBody("正在创建全新的空白维度……"))
+                ModStore.toJson(new ModNetwork.MessageBody("正在创建全新的隔离维度……"))
         );
     }
 
@@ -621,6 +621,8 @@ public final class ModService {
         map.spawnY = form.spawnY;
         map.spawnZ = form.spawnZ;
         map.direction = form.direction == null ? MapDefinition.Direction.SOUTH : form.direction;
+        map.terrainType = form.terrainType == null ? MapDefinition.TerrainType.FLAT : form.terrainType;
+        map.terrainSeed = form.terrainSeed;
         map.flatLayers = form.flatLayers == null ? new ArrayList<>() : new ArrayList<>(form.flatLayers);
     }
 

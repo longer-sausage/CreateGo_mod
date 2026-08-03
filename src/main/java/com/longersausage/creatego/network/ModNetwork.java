@@ -222,6 +222,8 @@ public final class ModNetwork {
         public int spawnY = 65;
         public int spawnZ;
         public MapDefinition.Direction direction = MapDefinition.Direction.SOUTH;
+        public MapDefinition.TerrainType terrainType = MapDefinition.TerrainType.FLAT;
+        public long terrainSeed;
         public java.util.List<MapDefinition.FlatLayer> flatLayers = new java.util.ArrayList<>();
     }
 

@@ -66,9 +66,12 @@ public final class MapScreen extends BaseScreen {
     private boolean isStructureConfiguring;
     private boolean isStructureDetailConfiguring;
     private int terrainPageIndex;
+    private MapDefinition.TerrainType editingTerrainType = MapDefinition.TerrainType.FLAT;
+    private String editingTerrainSeed = "0";
     private List<MapDefinition.FlatLayer> editingFlatLayers = new ArrayList<>();
     private List<EditBox> layerBlockFields = new ArrayList<>();
     private List<EditBox> layerCountFields = new ArrayList<>();
+    private EditBox terrainSeedField;
     private EditBox originXField;
     private EditBox originYField;
     private EditBox originZField;
@@ -165,6 +168,7 @@ public final class MapScreen extends BaseScreen {
         spawnXField = null;
         spawnYField = null;
         spawnZField = null;
+        terrainSeedField = null;
         originXField = null;
         originYField = null;
         originZField = null;
@@ -577,16 +581,56 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
-     * Builds superflat terrain layer configuration widgets.
-     * 构建超平坦地层配置控件。
+     * Builds terrain type tabs and the selected generator's configuration widgets.
+     * 构建地形类型页签以及所选生成器的配置控件。
      */
     private void buildTerrainWidgets() {
         int left = width / 2 - 190;
-        int top = height / 2 - 125;
+        int top = height / 2 - 145;
+        MapDefinition.TerrainType[] types = MapDefinition.TerrainType.values();
+        for (int index = 0; index < types.length; index++) {
+            MapDefinition.TerrainType type = types[index];
+            ModernButton button = ModernButton.create(
+                    Component.literal(terrainTypeName(type)),
+                    ignored -> selectTerrainType(type)
+            ).bounds(left + index * 98, top + 5, 86, 20).build();
+            if (type == editingTerrainType) {
+                button.variant(ModernButton.Variant.PRIMARY);
+            }
+            addRenderableWidget(button);
+        }
+
+        if (editingTerrainType == MapDefinition.TerrainType.FLAT) {
+            buildFlatTerrainWidgets(left, top);
+        } else if (editingTerrainType == MapDefinition.TerrainType.OVERWORLD
+                || editingTerrainType == MapDefinition.TerrainType.NETHER) {
+            buildSeedTerrainWidgets(left, top);
+        }
+
+        int actionY = editingTerrainType == MapDefinition.TerrainType.FLAT ? top + 245 : top + 105;
+        addRenderableWidget(ModernButton.create(
+                Component.literal("确定保存地形"),
+                ignored -> saveTerrainConfig()
+        ).bounds(left, actionY, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
+
+        addRenderableWidget(ModernButton.create(
+                Component.literal("取消"),
+                ignored -> cancelTerrainConfig()
+        ).bounds(left + 195, actionY, 185, 20).variant(ModernButton.Variant.GHOST).build());
+    }
+
+    /**
+     * Builds the paginated superflat layer editor below the terrain tabs.
+     * 在地形页签下方构建分页超平坦地层编辑器。
+     *
+     * @param left panel left coordinate / 面板左坐标
+     * @param top panel top coordinate / 面板上坐标
+     */
+    private void buildFlatTerrainWidgets(int left, int top) {
         addRenderableWidget(ModernButton.create(
                 Component.literal("+ 新增地层"),
                 ignored -> addFlatLayer()
-        ).bounds(left + 270, top + 5, 110, 20).variant(ModernButton.Variant.PRIMARY).build());
+        ).bounds(left + 270, top + 35, 110, 20).variant(ModernButton.Variant.PRIMARY).build());
 
         int total = editingFlatLayers.size();
         int first = terrainPageIndex * LAYERS_PER_PAGE;
@@ -594,7 +638,7 @@ public final class MapScreen extends BaseScreen {
 
         for (int uiIndex = first; uiIndex < last; uiIndex++) {
             int row = uiIndex - first;
-            int rowY = top + 35 + row * 28;
+            int rowY = top + 65 + row * 28;
             int listIndex = total - 1 - uiIndex;
             MapDefinition.FlatLayer layer = editingFlatLayers.get(listIndex);
             final int targetIndex = listIndex;
@@ -623,24 +667,30 @@ public final class MapScreen extends BaseScreen {
         Button previous = addRenderableWidget(ModernButton.create(
                 Component.literal("上一页"),
                 ignored -> changeTerrainPage(-1)
-        ).bounds(left, top + 155, 90, 20).build());
+        ).bounds(left, top + 185, 90, 20).build());
         previous.active = terrainPageIndex > 0;
 
         Button next = addRenderableWidget(ModernButton.create(
                 Component.literal("下一页"),
                 ignored -> changeTerrainPage(1)
-        ).bounds(left + 290, top + 155, 90, 20).build());
+        ).bounds(left + 290, top + 185, 90, 20).build());
         next.active = (terrainPageIndex + 1) * LAYERS_PER_PAGE < total;
+    }
 
-        addRenderableWidget(ModernButton.create(
-                Component.literal("确定保存地层"),
-                ignored -> saveTerrainConfig()
-        ).bounds(left, top + 185, 185, 20).variant(ModernButton.Variant.PRIMARY).build());
-
-        addRenderableWidget(ModernButton.create(
-                Component.literal("取消"),
-                ignored -> cancelTerrainConfig()
-        ).bounds(left + 195, top + 185, 185, 20).variant(ModernButton.Variant.GHOST).build());
+    /**
+     * Builds the numeric seed field shared by overworld and Nether generators.
+     * 构建主世界与下界生成器共用的数字种子字段。
+     *
+     * @param left panel left coordinate / 面板左坐标
+     * @param top panel top coordinate / 面板上坐标
+     */
+    private void buildSeedTerrainWidgets(int left, int top) {
+        terrainSeedField = addRenderableWidget(new ModernEditBox(
+                font, left + 80, top + 55, 300, 20, Component.literal("世界种子")
+        ));
+        terrainSeedField.setMaxLength(20);
+        terrainSeedField.setFilter(value -> value.matches("-?[0-9]*"));
+        terrainSeedField.setValue(editingTerrainSeed);
     }
 
     private void openTerrainConfig() {
@@ -648,6 +698,8 @@ public final class MapScreen extends BaseScreen {
         if (map == null) {
             return;
         }
+        editingTerrainType = map.terrainType == null ? MapDefinition.TerrainType.FLAT : map.terrainType;
+        editingTerrainSeed = Long.toString(map.terrainSeed);
         editingFlatLayers = new ArrayList<>();
         if (map.flatLayers != null) {
             for (MapDefinition.FlatLayer layer : map.flatLayers) {
@@ -657,6 +709,30 @@ public final class MapScreen extends BaseScreen {
         isTerrainConfiguring = true;
         terrainPageIndex = 0;
         rebuildWidgets();
+    }
+
+    /**
+     * Selects a terrain generator while retaining unsaved settings for every type.
+     * 选择地形生成器，同时保留每种类型尚未保存的设置。
+     *
+     * @param type selected terrain generator / 所选地形生成器
+     */
+    private void selectTerrainType(MapDefinition.TerrainType type) {
+        syncTerrainFieldsFromUI();
+        syncTerrainSeedFromUI();
+        editingTerrainType = type;
+        terrainPageIndex = 0;
+        rebuildWidgets();
+    }
+
+    /**
+     * Retains the current seed text before rebuilding the terrain screen.
+     * 在重建地形界面前保留当前种子文本。
+     */
+    private void syncTerrainSeedFromUI() {
+        if (terrainSeedField != null) {
+            editingTerrainSeed = terrainSeedField.getValue().strip();
+        }
     }
 
     private void syncTerrainFieldsFromUI() {
@@ -701,24 +777,39 @@ public final class MapScreen extends BaseScreen {
 
     private void saveTerrainConfig() {
         syncTerrainFieldsFromUI();
-        for (int i = 0; i < editingFlatLayers.size(); i++) {
-            MapDefinition.FlatLayer layer = editingFlatLayers.get(i);
-            String id = layer.blockId == null ? "" : layer.blockId.strip().toLowerCase(java.util.Locale.ROOT);
-            if (id.isEmpty()) {
-                ScreenHelper.message("第 " + (i + 1) + " 层方块 ID 不能为空。");
-                return;
+        syncTerrainSeedFromUI();
+        if (editingTerrainType == MapDefinition.TerrainType.FLAT) {
+            for (int i = 0; i < editingFlatLayers.size(); i++) {
+                MapDefinition.FlatLayer layer = editingFlatLayers.get(i);
+                String id = layer.blockId == null ? "" : layer.blockId.strip().toLowerCase(java.util.Locale.ROOT);
+                if (id.isEmpty()) {
+                    ScreenHelper.message("第 " + (i + 1) + " 层方块 ID 不能为空。");
+                    return;
+                }
+                if (!id.contains(":")) {
+                    id = "minecraft:" + id;
+                }
+                layer.blockId = id;
+                if (layer.count < 1) {
+                    ScreenHelper.message("第 " + (i + 1) + " 层数必须大于 0。");
+                    return;
+                }
             }
-            if (!id.contains(":")) {
-                id = "minecraft:" + id;
-            }
-            layer.blockId = id;
-            if (layer.count < 1) {
-                ScreenHelper.message("第 " + (i + 1) + " 层数必须大于 0。");
+        }
+        long terrainSeed = 0L;
+        if (editingTerrainType == MapDefinition.TerrainType.OVERWORLD
+                || editingTerrainType == MapDefinition.TerrainType.NETHER) {
+            try {
+                terrainSeed = Long.parseLong(editingTerrainSeed);
+            } catch (NumberFormatException exception) {
+                ScreenHelper.message("世界种子必须是 -9223372036854775808 到 9223372036854775807 之间的整数。");
                 return;
             }
         }
         MapDefinition map = configuredMap();
         if (map != null) {
+            map.terrainType = editingTerrainType;
+            map.terrainSeed = terrainSeed;
             map.flatLayers = new ArrayList<>(editingFlatLayers);
         }
         isTerrainConfiguring = false;
@@ -728,6 +819,7 @@ public final class MapScreen extends BaseScreen {
     private void cancelTerrainConfig() {
         isTerrainConfiguring = false;
         editingFlatLayers.clear();
+        editingTerrainSeed = "0";
         rebuildWidgets();
     }
 
@@ -908,6 +1000,8 @@ public final class MapScreen extends BaseScreen {
         form.direction = direction;
         MapDefinition map = configuredMap();
         if (map != null) {
+            form.terrainType = map.terrainType == null ? MapDefinition.TerrainType.FLAT : map.terrainType;
+            form.terrainSeed = map.terrainSeed;
             if (map.flatLayers != null) {
                 form.flatLayers = new ArrayList<>(map.flatLayers);
             }
@@ -1172,35 +1266,62 @@ public final class MapScreen extends BaseScreen {
     }
 
     /**
-     * Draws superflat terrain configuration panel and section headers.
-     * 绘制超平坦地形配置面板与栏目标题。
+     * Draws the selected terrain generator configuration and contextual help.
+     * 绘制所选地形生成器配置及其上下文提示。
      */
     private void renderTerrainConfigBackground(GuiGraphics graphics) {
         int left = width / 2 - 190;
-        int top = height / 2 - 125;
-        drawPanel(graphics, left - 18, top - 30, 416, 270);
-        graphics.drawCenteredString(font, "配置超平坦地形：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
-        graphics.drawString(font, "地层列表（从顶层到底层排列）：", left, top + 10, UITheme.TEXT_MUTED, false);
-        int total = editingFlatLayers.size();
-        int first = terrainPageIndex * LAYERS_PER_PAGE;
-        int last = Math.min(total, first + LAYERS_PER_PAGE);
-        for (int uiIndex = first; uiIndex < last; uiIndex++) {
-            int row = uiIndex - first;
-            int rowY = top + 35 + row * 28;
-            int layerNumber = total - uiIndex;
-            graphics.drawString(font, "第 " + layerNumber + " 层", left, rowY + 5, UITheme.TEXT_MUTED, false);
+        int top = height / 2 - 145;
+        int panelHeight = editingTerrainType == MapDefinition.TerrainType.FLAT ? 315 : 175;
+        drawPanel(graphics, left - 18, top - 30, 416, panelHeight);
+        graphics.drawCenteredString(font, "配置地形：" + configuredMapId, width / 2, top - 20, UITheme.TEXT);
+        if (editingTerrainType == MapDefinition.TerrainType.FLAT) {
+            graphics.drawString(font, "地层列表（从顶层到底层排列）：", left, top + 40, UITheme.TEXT_MUTED, false);
+            int total = editingFlatLayers.size();
+            int first = terrainPageIndex * LAYERS_PER_PAGE;
+            int last = Math.min(total, first + LAYERS_PER_PAGE);
+            for (int uiIndex = first; uiIndex < last; uiIndex++) {
+                int row = uiIndex - first;
+                int rowY = top + 65 + row * 28;
+                int layerNumber = total - uiIndex;
+                graphics.drawString(font, "第 " + layerNumber + " 层", left, rowY + 5, UITheme.TEXT_MUTED, false);
+            }
+            if (editingFlatLayers.isEmpty()) {
+                graphics.drawCenteredString(font, "暂无地层配置，请点击右侧按钮新增。", width / 2, top + 105, UITheme.TEXT_DIM);
+            }
+            int totalPages = Math.max(1, (editingFlatLayers.size() + LAYERS_PER_PAGE - 1) / LAYERS_PER_PAGE);
+            graphics.drawCenteredString(
+                    font,
+                    "第 " + (terrainPageIndex + 1) + " / " + totalPages + " 页",
+                    width / 2,
+                    top + 190,
+                    UITheme.TEXT_MUTED
+            );
+        } else if (editingTerrainType == MapDefinition.TerrainType.VOID) {
+            graphics.drawCenteredString(font, "虚空地形没有额外配置。", width / 2, top + 65, UITheme.TEXT_DIM);
+        } else {
+            graphics.drawString(font, "世界种子", left, top + 61, UITheme.TEXT_MUTED, false);
+            String description = editingTerrainType == MapDefinition.TerrainType.OVERWORLD
+                    ? "使用原版主世界群系、洞穴、矿物与结构生成。"
+                    : "使用原版下界群系、地形、矿物与结构生成。";
+            graphics.drawString(font, description, left, top + 85, UITheme.TEXT_DIM, false);
         }
-        if (editingFlatLayers.isEmpty()) {
-            graphics.drawCenteredString(font, "暂无地层配置，请点击右上角加号新增。", width / 2, top + 75, UITheme.TEXT_DIM);
-        }
-        int totalPages = Math.max(1, (editingFlatLayers.size() + LAYERS_PER_PAGE - 1) / LAYERS_PER_PAGE);
-        graphics.drawCenteredString(
-                font,
-                "第 " + (terrainPageIndex + 1) + " / " + totalPages + " 页",
-                width / 2,
-                top + 160,
-                UITheme.TEXT_MUTED
-        );
+    }
+
+    /**
+     * Returns the localized label displayed on one terrain type tab.
+     * 返回地形类型页签显示的本地化名称。
+     *
+     * @param type terrain type / 地形类型
+     * @return Chinese display name / 中文显示名
+     */
+    private static String terrainTypeName(MapDefinition.TerrainType type) {
+        return switch (type) {
+            case VOID -> "虚空";
+            case FLAT -> "超平坦";
+            case OVERWORLD -> "主世界";
+            case NETHER -> "下界";
+        };
     }
 
     /**

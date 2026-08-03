@@ -1,6 +1,6 @@
 /*
- * Creates and deletes isolated empty dimensions for player map sessions.
- * 为玩家地图会话创建并删除相互隔离的空白维度。
+ * Creates and deletes isolated terrain dimensions for player map sessions.
+ * 为玩家地图会话创建并删除相互隔离的地形维度。
  *
  * Author: CreateGo
  * Date: 2026-07-31
@@ -26,11 +26,16 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.util.valueproviders.ConstantInt;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.flat.FlatLayerInfo;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import org.slf4j.Logger;
@@ -57,8 +62,8 @@ public final class DimensionPool {
     }
 
     /**
-     * Allocates a fresh empty dimension and records the player's return destination.
-     * 分配一个全新的空白维度，并记录玩家的返回目标。
+     * Allocates a fresh terrain dimension and records the player's return destination.
+     * 分配一个全新的地形维度，并记录玩家的返回目标。
      *
      * @param player entering player / 进入的玩家
      * @param mapId selected map identifier / 所选地图标识
@@ -72,13 +77,23 @@ public final class DimensionPool {
                 "cg_dim_" + player.getUUID().toString().replace("-", "") + "_" + UUID.randomUUID().toString().replace("-", "")
         );
         MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
-        ServerLevel level = DynamicDimensionRegistry.from(player.server).createDynamicDimension(
-                dimensionId,
-                createChunkGenerator(player.server, map),
-                createDimensionType()
-        );
+        MapDefinition.TerrainType terrainType = terrainType(map);
+        if (terrainType == MapDefinition.TerrainType.OVERWORLD
+                || terrainType == MapDefinition.TerrainType.NETHER) {
+            DynamicDimensionSeedOverride.begin(dimensionId, map == null ? 0L : map.terrainSeed);
+        }
+        ServerLevel level;
+        try {
+            level = DynamicDimensionRegistry.from(player.server).createDynamicDimension(
+                    dimensionId,
+                    createChunkGenerator(player.server, map),
+                    createDimensionType(terrainType)
+            );
+        } finally {
+            DynamicDimensionSeedOverride.clear();
+        }
         if (level == null) {
-            throw new IllegalStateException("无法创建空白维度。");
+            throw new IllegalStateException("无法创建隔离维度。");
         }
         Session session = new Session(
                 player.getUUID(),
@@ -456,18 +471,66 @@ public final class DimensionPool {
     }
 
     /**
-     * Builds a flat generator with configured layers or empty void layers.
-     * 构建包含配置地层或空白地层的平坦生成器。
+     * Builds the selected void, superflat, overworld, or Nether chunk generator.
+     * 构建所选的虚空、超平坦、主世界或下界区块生成器。
      *
      * @param server running server / 运行中的服务端
      * @param map map definition / 地图定义
-     * @return chunk generator with flat layers / 包含平坦地层的区块生成器
+     * @return configured chunk generator / 已配置区块生成器
      */
-    private static FlatLevelSource createChunkGenerator(MinecraftServer server, MapDefinition map) {
+    private static ChunkGenerator createChunkGenerator(MinecraftServer server, MapDefinition map) {
+        MapDefinition.TerrainType terrainType = terrainType(map);
+        if (terrainType == MapDefinition.TerrainType.OVERWORLD
+                || terrainType == MapDefinition.TerrainType.NETHER) {
+            return createNoiseChunkGenerator(server, terrainType);
+        }
+        return createFlatChunkGenerator(server, map, terrainType == MapDefinition.TerrainType.FLAT);
+    }
+
+    /**
+     * Builds a vanilla multi-noise generator for the overworld or Nether preset.
+     * 为主世界或下界预设构建原版多噪声生成器。
+     *
+     * @param server running server / 运行中的服务端
+     * @param terrainType overworld or Nether type / 主世界或下界类型
+     * @return vanilla noise generator / 原版噪声生成器
+     */
+    private static NoiseBasedChunkGenerator createNoiseChunkGenerator(
+            MinecraftServer server,
+            MapDefinition.TerrainType terrainType
+    ) {
+        var access = server.registryAccess();
+        var biomeParameters = access.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST);
+        var noiseSettings = access.lookupOrThrow(Registries.NOISE_SETTINGS);
+        boolean nether = terrainType == MapDefinition.TerrainType.NETHER;
+        return new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(biomeParameters.getOrThrow(
+                        nether
+                                ? MultiNoiseBiomeSourceParameterLists.NETHER
+                                : MultiNoiseBiomeSourceParameterLists.OVERWORLD
+                )),
+                noiseSettings.getOrThrow(nether ? NoiseGeneratorSettings.NETHER : NoiseGeneratorSettings.OVERWORLD)
+        );
+    }
+
+    /**
+     * Builds an empty or layered flat generator using the void biome.
+     * 使用虚空群系构建空白或分层的平坦生成器。
+     *
+     * @param server running server / 运行中的服务端
+     * @param map map definition / 地图定义
+     * @param includeLayers whether configured layers are included / 是否包含配置地层
+     * @return flat generator / 平坦生成器
+     */
+    private static FlatLevelSource createFlatChunkGenerator(
+            MinecraftServer server,
+            MapDefinition map,
+            boolean includeLayers
+    ) {
         var access = server.registryAccess();
         var biomes = access.lookupOrThrow(Registries.BIOME);
         List<FlatLayerInfo> layers = new java.util.ArrayList<>();
-        if (map != null && map.flatLayers != null) {
+        if (includeLayers && map != null && map.flatLayers != null) {
             for (MapDefinition.FlatLayer layer : map.flatLayers) {
                 if (layer.blockId != null && !layer.blockId.isBlank() && layer.count > 0) {
                     ResourceLocation location = ResourceLocation.tryParse(layer.blockId);
@@ -494,12 +557,32 @@ public final class DimensionPool {
     }
 
     /**
-     * Creates a bright fixed-time dimension whose lowest valid build coordinate is Y=0.
-     * 创建一个明亮、固定时间且最低有效建筑坐标为 Y=0 的维度类型。
+     * Creates an isolated dimension type matching the selected terrain's visual rules.
+     * 创建符合所选地形视觉规则的隔离维度类型。
      *
+     * @param terrainType selected terrain type / 所选地形类型
      * @return isolated dimension type / 隔离维度类型
      */
-    private static DimensionType createDimensionType() {
+    private static DimensionType createDimensionType(MapDefinition.TerrainType terrainType) {
+        if (terrainType == MapDefinition.TerrainType.NETHER) {
+            return new DimensionType(
+                    OptionalLong.of(18000L),
+                    false,
+                    true,
+                    true,
+                    false,
+                    8.0D,
+                    false,
+                    true,
+                    0,
+                    256,
+                    128,
+                    BlockTags.INFINIBURN_NETHER,
+                    BuiltinDimensionTypes.NETHER_EFFECTS,
+                    0.1F,
+                    new DimensionType.MonsterSettings(true, false, ConstantInt.of(7), 15)
+            );
+        }
         return new DimensionType(
                 OptionalLong.of(6000L),
                 true,
@@ -517,6 +600,17 @@ public final class DimensionPool {
                 1.0F,
                 new DimensionType.MonsterSettings(false, false, ConstantInt.of(0), 0)
         );
+    }
+
+    /**
+     * Returns a non-null terrain type for current and legacy map definitions.
+     * 为当前及旧版地图定义返回非空地形类型。
+     *
+     * @param map map definition / 地图定义
+     * @return selected type, defaulting to superflat / 所选类型，默认超平坦
+     */
+    private static MapDefinition.TerrainType terrainType(MapDefinition map) {
+        return map == null || map.terrainType == null ? MapDefinition.TerrainType.FLAT : map.terrainType;
     }
 
     /**
