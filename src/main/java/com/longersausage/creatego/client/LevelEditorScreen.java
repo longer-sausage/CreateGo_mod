@@ -87,10 +87,6 @@ public final class LevelEditorScreen extends BaseScreen {
         addRenderableWidget(ModernButton.create(Component.literal("保存设置"), button -> save())
                 .bounds(left + 20, top + 192, 135, 26)
                 .variant(ModernButton.Variant.PRIMARY).build());
-        ModNetwork.LevelPlayStatus currentStatus = ClientController.levelPlayStatus();
-        boolean playing = currentStatus != null && currentStatus.active;
-        addRenderableWidget(ModernButton.create(Component.literal(playing ? "停止模拟" : "模拟游玩"), button -> simulate())
-                .bounds(left + 165, top + 192, 135, 26).build());
         addRenderableWidget(ModernButton.create(Component.literal("删除关卡"), button -> deleteLevel())
                 .bounds(left + 310, top + 192, 140, 26)
                 .variant(ModernButton.Variant.DANGER).build());
@@ -130,20 +126,6 @@ public final class LevelEditorScreen extends BaseScreen {
         if (parseTime()) {
             ScreenHelper.send("save_level", view);
         }
-    }
-
-    private void simulate() {
-        ModNetwork.LevelPlayStatus status = ClientController.levelPlayStatus();
-        if (status != null && status.active) {
-            ScreenHelper.send("stop_level_simulation", new Object());
-            onClose();
-            return;
-        }
-        if (!parseTime()) {
-            return;
-        }
-        ScreenHelper.send("start_level_simulation", view);
-        onClose();
     }
 
     private void deleteLevel() {

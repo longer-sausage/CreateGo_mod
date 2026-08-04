@@ -58,6 +58,9 @@ public final class ClientEvents {
         if (minecraft.level != null) {
             ensureSimulatedLocksInitialized(minecraft.level);
         }
+        while (ClientModEvents.LEVEL_MENU_KEY.consumeClick()) {
+            ClientController.openLevelMenu();
+        }
     }
 
     /**

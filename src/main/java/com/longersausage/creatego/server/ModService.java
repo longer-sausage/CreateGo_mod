@@ -81,6 +81,23 @@ public final class ModService {
                 sendSkin(player, ModStore.fromJson(json, SkinRequest.class).name);
                 return;
             }
+            if (action.equals("start_level_preview") || action.equals("start_level_challenge")) {
+                MapIdRequest request = ModStore.fromJson(json, MapIdRequest.class);
+                LevelRuntime.begin(
+                        player,
+                        request == null ? "" : request.mapId,
+                        action.equals("start_level_preview") ? LevelRuntime.Mode.PREVIEW : LevelRuntime.Mode.CHALLENGE
+                );
+                return;
+            }
+            if (action.equals("restart_level_session")) {
+                LevelRuntime.restart(player);
+                return;
+            }
+            if (action.equals("exit_level_session")) {
+                LevelRuntime.exit(player);
+                return;
+            }
             if (!player.hasPermissions(2)) {
                 ModNetwork.error(player, "没有管理权限。");
                 return;
@@ -112,11 +129,6 @@ public final class ModService {
                         true
                 );
                 case "delete_level" -> deleteLevel(player);
-                case "start_level_simulation" -> startLevelSimulation(
-                        player,
-                        ModStore.fromJson(json, ModNetwork.LevelEditorView.class)
-                );
-                case "stop_level_simulation" -> LevelRuntime.stop(player);
                 case "save_npc" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "save_dialogue" -> saveNpc(player, ModStore.fromJson(json, NpcData.class), false);
                 case "delete_npc" -> deleteNpc(player, UUID.fromString(
@@ -460,6 +472,27 @@ public final class ModService {
     }
 
     /**
+     * Allocates and queues a fresh map dimension owned by a formal level session.
+     * 为正式关卡会话分配并排队创建一个全新地图维度。
+     *
+     * @param player session leader / 会话发起者
+     * @param rawMapId selected map identifier / 所选地图标识
+     * @return allocated dimension session / 已分配维度会话
+     */
+    public static DimensionPool.Session requestLevelMap(ServerPlayer player, String rawMapId) {
+        requireNotInMapSession(player);
+        String mapId = normalizeMapId(rawMapId);
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
+        if (map == null || map.level == null) {
+            throw new IllegalArgumentException("关卡不存在。");
+        }
+        DimensionPool.Session session = DimensionPool.allocate(player, mapId);
+        pendingEntries(player.server).add(new PendingEntry(player.getUUID(), session.dimensionKey(), 0));
+        LOGGER.info("玩家 [{}] 请求创建正式关卡维度 [地图 ID: {}]", player.getScoreboardName(), mapId);
+        return session;
+    }
+
+    /**
      * Registers the player's currently bound map as a playable level.
      * 将玩家当前绑定的地图注册为可游玩关卡。
      *
@@ -524,32 +557,11 @@ public final class ModService {
         if (map.level == null) {
             throw new IllegalArgumentException("当前地图尚未注册为关卡。");
         }
-        LevelRuntime.stop(player);
         map.level = null;
         ModStore.get(player.server).save();
         LOGGER.info("玩家 [{}] 删除关卡配置 [地图: {}]", player.getScoreboardName(), map.id);
         ModNetwork.broadcastState(player);
         ModNetwork.openLevelEditor(player);
-    }
-
-    /**
-     * Saves the latest editor document and starts simulation without reopening a screen.
-     * 保存最新编辑器文档并启动模拟，且不重新打开界面。
-     *
-     * @param player requesting operator / 请求管理员
-     * @param view complete editor document / 完整编辑器文档
-     * @throws IOException when persistent state cannot be written / 持久状态无法写入时抛出
-     */
-    private static void startLevelSimulation(ServerPlayer player, ModNetwork.LevelEditorView view) throws IOException {
-        MapDefinition map = requireBoundMap(player);
-        if (view == null || !map.id.equals(view.mapId) || view.level == null) {
-            throw new IllegalArgumentException("关卡配置与当前绑定地图不一致。");
-        }
-        LevelConditionEvaluator.validate(view.level);
-        map.level = ModStore.fromJson(ModStore.toJson(view.level), LevelDefinition.class);
-        ModStore.get(player.server).save();
-        LOGGER.info("玩家 [{}] 保存配置并请求模拟关卡 [地图: {}]", player.getScoreboardName(), map.id);
-        LevelRuntime.start(player);
     }
 
     /**
@@ -597,7 +609,10 @@ public final class ModService {
         });
         // Complete structure loading before teleport so chunk tracking sends final chunks once.
         // 在传送前完成结构加载，使区块跟踪仅发送一次最终区块数据。
-        teleportToSpawn(player, level, map);
+        boolean formalLevelSession = LevelRuntime.onMapPopulated(player, level, session, map);
+        if (!formalLevelSession) {
+            teleportToSpawn(player, level, map);
+        }
         LOGGER.info(
                 "成功为玩家 [{}] 加载并填充地图维度 [地图 ID: {}, Sable 物理结构: {}]",
                 player.getScoreboardName(),

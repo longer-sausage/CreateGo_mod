@@ -49,6 +49,8 @@ import java.util.UUID;
 public final class FourthDimensionalPocketStorage {
     private static final Logger LOGGER = LoggerFactory.getLogger(FourthDimensionalPocketStorage.class);
     private static final String POCKET_TAG = "CreateGoFourthDimensionalPocket";
+    private static final String LEVEL_TAG = "Level";
+    private static final String TRIAL_TAG = "TrialOneTime";
     private static final String ID_TAG = "Id";
     private static final String NAME_TAG = "Name";
     private static final String STORAGE_DIRECTORY = "fourth_dimensional_pockets";
@@ -76,6 +78,65 @@ public final class FourthDimensionalPocketStorage {
      */
     public static boolean isFilled(ItemStack stack) {
         return readPocketTag(stack).hasUUID(ID_TAG);
+    }
+
+    /**
+     * Returns the playable level identifier written to the pocket's root custom data.
+     * 返回写入四次元口袋根自定义数据的可游玩关卡标识。
+     *
+     * @param stack pocket item stack / 口袋物品堆叠
+     * @return trimmed level identifier, or an empty string / 去除首尾空白的关卡标识，不存在时为空
+     */
+    public static String getLevelId(ItemStack stack) {
+        CompoundTag root = stack.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+        return root.getString(LEVEL_TAG).strip();
+    }
+
+    /**
+     * Creates an independently consumable copy of a filled pocket for one challenge participant.
+     * 为一名挑战参与者创建可独立消耗的已填充口袋副本。
+     *
+     * @param server running server / 运行中的服务端
+     * @param source original portal pocket / 原始门户口袋
+     * @return one-time pocket copy / 一次性口袋副本
+     * @throws IOException when the stored structure cannot be copied / 无法复制已存储结构时抛出
+     */
+    public static ItemStack createTrialCopy(MinecraftServer server, ItemStack source) throws IOException {
+        UUID sourceId = getPocketId(source);
+        if (sourceId == null) {
+            throw new IOException("四次元口袋中没有物理结构。");
+        }
+        Path sourcePath = getDataPath(server, sourceId);
+        if (!Files.isRegularFile(sourcePath)) {
+            throw new IOException("四次元口袋引用的物理结构数据不存在。");
+        }
+        UUID copyId = UUID.randomUUID();
+        Path copyPath = getDataPath(server, copyId);
+        Files.createDirectories(copyPath.getParent());
+        Files.copy(sourcePath, copyPath, StandardCopyOption.REPLACE_EXISTING);
+        ItemStack copy = source.copyWithCount(1);
+        CompoundTag root = copy.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+        CompoundTag pocketTag = root.getCompound(POCKET_TAG).copy();
+        pocketTag.putUUID(ID_TAG, copyId);
+        pocketTag.putBoolean(TRIAL_TAG, true);
+        root.put(POCKET_TAG, pocketTag);
+        root.remove(LEVEL_TAG);
+        copy.set(DataComponents.CUSTOM_DATA, CustomData.of(root));
+        return copy;
+    }
+
+    /**
+     * Removes the backing file of an unused one-time pocket.
+     * 删除尚未使用的一次性口袋所对应的后端文件。
+     *
+     * @param server running server / 运行中的服务端
+     * @param stack trial pocket / 一次性口袋
+     */
+    public static void discardTrialCopy(MinecraftServer server, ItemStack stack) {
+        CompoundTag pocketTag = readPocketTag(stack);
+        if (pocketTag.getBoolean(TRIAL_TAG) && pocketTag.hasUUID(ID_TAG)) {
+            deleteQuietly(getDataPath(server, pocketTag.getUUID(ID_TAG)));
+        }
     }
 
     /**
@@ -167,7 +228,11 @@ public final class FourthDimensionalPocketStorage {
             restored.updateLastPose();
             restored.updateBoundingBox();
             restored.forceUpdateGlobalBounds();
+            boolean oneTime = readPocketTag(stack).getBoolean(TRIAL_TAG);
             clearPocketTag(stack);
+            if (oneTime) {
+                stack.shrink(1);
+            }
             deleteQuietly(dataPath);
             LOGGER.info("玩家 [{}] 已从四次元口袋释放 Sable 结构 [{}]。",
                     player.getScoreboardName(), restored.getUniqueId());

@@ -17,6 +17,10 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.EntityTravelToDimensionEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +45,7 @@ public final class ServerEvents {
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             LOGGER.debug("玩家 [{}] 登录，同步模组数据状态", player.getScoreboardName());
+            LevelRuntime.restorePendingBackup(player);
             DimensionPool.bindOnEntry(player, net.minecraft.world.level.Level.OVERWORLD);
             ModNetwork.syncState(player);
         }
@@ -72,7 +77,9 @@ public final class ServerEvents {
             DialogueRuntime.stop(player);
             net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> currentDimension = player.serverLevel().dimension();
             // LoggedOut fires before PlayerList saves player NBT. / LoggedOut 在 PlayerList 保存玩家 NBT 前触发。
-            ModService.closeSession(player, true);
+            if (!LevelRuntime.onLogout(player)) {
+                ModService.closeSession(player, true);
+            }
             DimensionPool.checkAndCleanupDimension(player.server, currentDimension, player.getUUID());
         }
     }
@@ -88,7 +95,7 @@ public final class ServerEvents {
         if (event.getEntity() instanceof ServerPlayer player) {
             net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> fromDimension = event.getFrom();
             DialogueRuntime.stop(player);
-            LevelRuntime.discard(player);
+            LevelRuntime.onDimensionChanged(player, fromDimension);
             DimensionPool.Session fromSession = DimensionPool.sessionForDimension(player.server, fromDimension);
             DimensionPool.Session enteredSession = DimensionPool.bindOnEntry(player, fromDimension);
             if (fromSession != null && !fromDimension.equals(player.serverLevel().dimension())) {
@@ -125,5 +132,71 @@ public final class ServerEvents {
     public static void onServerTick(ServerTickEvent.Post event) {
         ModService.tickPendingEntries(event.getServer());
         LevelRuntime.tick(event.getServer());
+    }
+
+    /**
+     * Cancels normal death and converts it into whole-team challenge failure.
+     * 取消正常死亡，并将其转换为全队挑战失败。
+     *
+     * @param event living death event / 生物死亡事件
+     */
+    @SubscribeEvent
+    public static void onLivingDeath(LivingDeathEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player && LevelRuntime.failOnDeath(player)) {
+            event.setCanceled(true);
+        }
+    }
+
+    /**
+     * Prevents challenge participants from attacking any entity.
+     * 阻止挑战参与者攻击任何实体。
+     *
+     * @param event attack event / 攻击事件
+     */
+    @SubscribeEvent
+    public static void onAttackEntity(AttackEntityEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player && LevelRuntime.isChallengeParticipant(player)) {
+            event.setCanceled(true);
+        }
+    }
+
+    /**
+     * Cancels direct and projectile damage caused by challenge participants.
+     * 取消挑战参与者造成的直接伤害与弹射物伤害。
+     *
+     * @param event incoming damage event / 传入伤害事件
+     */
+    @SubscribeEvent
+    public static void onLivingIncomingDamage(LivingIncomingDamageEvent event) {
+        if (event.getSource().getEntity() instanceof ServerPlayer player
+                && LevelRuntime.isChallengeParticipant(player)) {
+            event.setCanceled(true);
+        }
+    }
+
+    /**
+     * Prevents challenge participants from breaking blocks.
+     * 阻止挑战参与者破坏方块。
+     *
+     * @param event block break event / 方块破坏事件
+     */
+    @SubscribeEvent
+    public static void onBreakBlock(BlockEvent.BreakEvent event) {
+        if (event.getPlayer() instanceof ServerPlayer player && LevelRuntime.isChallengeParticipant(player)) {
+            event.setCanceled(true);
+        }
+    }
+
+    /**
+     * Prevents challenge participants from placing blocks while preserving pocket structure release.
+     * 阻止挑战参与者放置方块，同时保留四次元口袋释放物理结构的能力。
+     *
+     * @param event block placement event / 方块放置事件
+     */
+    @SubscribeEvent
+    public static void onPlaceBlock(BlockEvent.EntityPlaceEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player && LevelRuntime.isChallengeParticipant(player)) {
+            event.setCanceled(true);
+        }
     }
 }

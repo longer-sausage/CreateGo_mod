@@ -1,246 +1,895 @@
 /*
- * Runs server-authoritative CreateGo level simulations.
- * 运行服务端权威的 CreateGo 关卡模拟。
+ * Runs isolated preview and team challenge sessions for CreateGo levels.
+ * 运行相互隔离的 CreateGo 关卡预览与团队挑战会话。
  *
  * Author: CreateGo
- * Date: 2026-08-04
+ * Date: 2026-08-05
  */
 
 package com.longersausage.creatego.server;
 
+import com.longersausage.creatego.CreateGo;
 import com.longersausage.creatego.data.LevelDefinition;
 import com.longersausage.creatego.data.MapDefinition;
 import com.longersausage.creatego.data.ModStore;
 import com.longersausage.creatego.network.ModNetwork;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtAccounter;
+import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
+import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
+import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
+import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.LevelResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
- * Owns transient play sessions and evaluates level rules on server ticks.
- * 管理临时游玩会话，并在服务端刻计算关卡规则。
+ * Owns formal level sessions and guarantees recoverable player-state isolation.
+ * 管理正式关卡会话，并保证玩家状态隔离可恢复。
  */
 public final class LevelRuntime {
     private static final Logger LOGGER = LoggerFactory.getLogger(LevelRuntime.class);
-    private static final Map<MinecraftServer, Map<UUID, PlaySession>> SESSIONS = new WeakHashMap<>();
+    private static final String BACKUP_DIRECTORY = "level_player_backups";
+    private static final Map<MinecraftServer, RuntimeState> STATES = new WeakHashMap<>();
 
     private LevelRuntime() {
     }
 
     /**
-     * Starts a clean simulation for the requesting player in the bound map dimension.
-     * 为请求玩家在绑定地图维度中启动一次全新模拟。
-     *
-     * @param player requesting challenger / 请求闯关者
+     * Enumerates supported isolated session modes.
+     * 枚举支持的隔离会话模式。
      */
-    public static synchronized void start(ServerPlayer player) {
-        DimensionPool.Session mapSession = DimensionPool.activeSession(player);
-        if (mapSession == null) {
-            throw new IllegalArgumentException("请先进入并绑定一张地图。");
-        }
-        MapDefinition map = ModStore.get(player.server).state().maps.get(mapSession.mapId());
+    public enum Mode {
+        PREVIEW,
+        CHALLENGE
+    }
+
+    /**
+     * Starts a preview or challenge after validating the portal and all online team members.
+     * 校验门户与全部在线队员后开始预览或挑战。
+     *
+     * @param player requesting player / 请求玩家
+     * @param rawMapId requested map identifier / 请求的地图标识
+     * @param mode requested mode / 请求模式
+     */
+    public static synchronized void begin(ServerPlayer player, String rawMapId, Mode mode) {
+        String mapId = rawMapId == null ? "" : rawMapId.strip();
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
         if (map == null || map.level == null) {
-            throw new IllegalArgumentException("当前地图尚未注册为关卡。");
+            throw new IllegalArgumentException("关卡不存在：" + mapId);
         }
         LevelConditionEvaluator.validate(map.level);
-        int totalTicks = Math.max(20, map.level.timeLimitSeconds * 20);
-        PlaySession session = new PlaySession(
+        ItemStack portal = findPortalPocket(player, mapId);
+        if (portal.isEmpty()) {
+            throw new IllegalArgumentException("请手持或携带绑定此关卡的四次元口袋。");
+        }
+        if (mode == Mode.CHALLENGE && !FourthDimensionalPocketStorage.isFilled(portal)) {
+            throw new IllegalArgumentException("开始挑战需要四次元口袋中装有物理结构。");
+        }
+        List<ServerPlayer> members = mode == Mode.CHALLENGE ? onlineTeamMembers(player) : List.of(player);
+        validateMembers(player.server, members);
+        DimensionPool.Session dimensionSession = ModService.requestLevelMap(player, mapId);
+        GroupSession group = new GroupSession(
+                UUID.randomUUID(),
+                mode,
+                mapId,
                 player.getUUID(),
-                map.id,
-                player.serverLevel().dimension(),
-                player.server.getTickCount(),
-                totalTicks
+                members.stream().map(ServerPlayer::getUUID).toList(),
+                dimensionSession.dimensionKey(),
+                portal.copyWithCount(1),
+                Math.max(20, map.level.timeLimitSeconds * 20)
         );
-        sessions(player.server).put(player.getUUID(), session);
-        player.setHealth(player.getMaxHealth());
-        player.teleportTo(
-                player.serverLevel(),
-                map.spawnX + 0.5D,
-                map.spawnY,
-                map.spawnZ + 0.5D,
-                java.util.Set.of(),
-                map.direction.yaw,
-                0.0F
-        );
-        LOGGER.info("玩家 [{}] 开始模拟关卡 [地图: {}, 时限: {} 秒]", player.getScoreboardName(), map.id, map.level.timeLimitSeconds);
-        sendStatus(
-                player,
-                session,
-                LevelConditionEvaluator.evaluate(player.serverLevel(), player, map.level.completionCondition),
-                ""
+        RuntimeState state = state(player.server);
+        state.byDimension.put(group.dimensionKey, group);
+        for (UUID memberId : group.memberIds) {
+            state.byPlayer.put(memberId, group);
+        }
+        LOGGER.info(
+                "玩家 [{}] 创建关卡会话 [地图: {}, 模式: {}, 成员数: {}]",
+                player.getScoreboardName(),
+                mapId,
+                mode,
+                group.memberIds.size()
         );
     }
 
     /**
-     * Stops one player's simulation without producing a result banner.
-     * 停止一个玩家的模拟且不生成结果横幅。
+     * Converts a populated map dimension into a formal preview or challenge session.
+     * 将已填充的地图维度转换为正式预览或挑战会话。
      *
-     * @param player target player / 目标玩家
+     * @param owner dimension owner / 维度所有者
+     * @param level populated level / 已填充世界
+     * @param dimensionSession map dimension session / 地图维度会话
+     * @param map map definition / 地图定义
+     * @return whether the dimension belongs to a formal level session / 该维度是否属于正式关卡会话
+     * @throws IOException when a backup or trial pocket cannot be created / 无法创建备份或试用口袋时抛出
      */
-    public static synchronized void stop(ServerPlayer player) {
-        PlaySession removed = sessions(player.server).remove(player.getUUID());
-        if (removed != null) {
-            ModNetwork.send(player, "level_play_status", ModStore.toJson(
-                    new ModNetwork.LevelPlayStatus(false, "已停止模拟", 0, removed.totalTicks, false, java.util.List.of())
-            ));
-            LOGGER.info("玩家 [{}] 停止模拟关卡 [地图: {}]", player.getScoreboardName(), removed.mapId);
+    public static synchronized boolean onMapPopulated(
+            ServerPlayer owner,
+            ServerLevel level,
+            DimensionPool.Session dimensionSession,
+            MapDefinition map
+    ) throws IOException {
+        GroupSession group = state(owner.server).byDimension.get(dimensionSession.dimensionKey());
+        if (group == null) {
+            return false;
+        }
+        group.transitioning = true;
+        List<ServerPlayer> members = resolveOnlineMembers(owner.server, group);
+        if (members.size() != group.memberIds.size()) {
+            removeGroup(owner.server, group);
+            throw new IOException("队伍成员在地图准备期间离线，挑战已取消。");
+        }
+        try {
+            if (group.mode == Mode.CHALLENGE) {
+                for (ServerPlayer ignored : members) {
+                    group.trialPockets.add(FourthDimensionalPocketStorage.createTrialCopy(owner.server, group.portalTemplate));
+                }
+            }
+            for (ServerPlayer member : members) {
+                writeBackup(member);
+            }
+            for (int index = 0; index < members.size(); index++) {
+                ServerPlayer member = members.get(index);
+                resetToCleanPlayer(member);
+                // Survival preserves ordinary right-click item use; server events still forbid combat and block edits.
+                // 生存模式保留普通右键物品使用；服务端事件仍会禁止战斗和方块编辑。
+                member.setGameMode(group.mode == Mode.PREVIEW ? GameType.SPECTATOR : GameType.SURVIVAL);
+                if (group.mode == Mode.CHALLENGE) {
+                    member.getInventory().setItem(0, group.trialPockets.get(index).copy());
+                    member.getInventory().selected = 0;
+                }
+                DimensionPool.prepareEntry(member, group.dimensionKey);
+                member.teleportTo(
+                        level,
+                        map.spawnX + 0.5D,
+                        map.spawnY,
+                        map.spawnZ + 0.5D,
+                        Set.of(),
+                        map.direction.yaw,
+                        0.0F
+                );
+            }
+            group.startedTick = owner.server.getTickCount();
+            group.active = true;
+            group.transitioning = false;
+            Map<UUID, LevelConditionEvaluator.Evaluation> initialEvaluations = new LinkedHashMap<>();
+            for (ServerPlayer member : members) {
+                initialEvaluations.put(
+                        member.getUUID(),
+                        LevelConditionEvaluator.evaluate(level, member, map.level.completionCondition)
+                );
+            }
+            sendStatuses(owner.server, group, map, initialEvaluations);
+            for (ServerPlayer member : members) {
+                ModNetwork.send(member, "close_screen", "{}");
+            }
+            LOGGER.info("关卡会话已进入地图 [会话: {}, 地图: {}, 模式: {}]", group.id, group.mapId, group.mode);
+            return true;
+        } catch (Exception exception) {
+            group.transitioning = false;
+            restoreMembers(owner.server, group);
+            discardTrialPockets(owner.server, group);
+            removeGroup(owner.server, group);
+            if (exception instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException("关卡会话初始化失败。", exception);
         }
     }
 
     /**
-     * Removes transient state when a player disconnects.
-     * 在玩家断开连接时移除临时状态。
+     * Evaluates every active team challenge after each server tick.
+     * 在每个服务端刻结束后计算全部活动团队挑战。
      *
-     * @param player disconnected player / 断开连接的玩家
-     */
-    public static synchronized void discard(ServerPlayer player) {
-        sessions(player.server).remove(player.getUUID());
-    }
-
-    /**
-     * Evaluates all active simulations after each server tick.
-     * 在每个服务端刻结束后计算全部活动模拟。
-     *
-     * @param server running server / 正在运行的服务端
+     * @param server running server / 运行中的服务端
      */
     public static synchronized void tick(MinecraftServer server) {
-        Iterator<PlaySession> iterator = sessions(server).values().iterator();
-        while (iterator.hasNext()) {
-            PlaySession session = iterator.next();
-            ServerPlayer player = server.getPlayerList().getPlayer(session.playerId);
-            MapDefinition map = ModStore.get(server).state().maps.get(session.mapId);
-            if (player == null || map == null || map.level == null
-                    || !player.serverLevel().dimension().equals(session.dimensionKey)) {
-                iterator.remove();
-                if (player != null) {
-                    finish(player, session, false, "模拟已中断");
-                }
+        List<GroupSession> groups = new ArrayList<>(state(server).byDimension.values());
+        for (GroupSession group : groups) {
+            if (!group.active || group.finishing) {
                 continue;
             }
-            if (player.isDeadOrDying()) {
-                iterator.remove();
-                finish(player, session, false, "闯关者死亡");
+            MapDefinition map = ModStore.get(server).state().maps.get(group.mapId);
+            ServerLevel level = server.getLevel(group.dimensionKey);
+            List<ServerPlayer> members = resolveOnlineMembers(server, group);
+            if (map == null || map.level == null || level == null || members.size() != group.memberIds.size()) {
+                finish(server, group, false, "队伍成员离线或关卡地图不可用", false);
                 continue;
             }
-            int elapsed = server.getTickCount() - session.startedTick;
-            int remaining = Math.max(0, session.totalTicks - elapsed);
-            if (remaining <= 0) {
-                iterator.remove();
-                finish(player, session, false, "时间耗尽");
+            if (members.stream().anyMatch(member -> !member.serverLevel().dimension().equals(group.dimensionKey))) {
+                finish(server, group, false, "有队员离开了关卡地图", false);
                 continue;
             }
-            // Complex entity and block predicates are sampled four times per second to protect tick time. / 复杂实体与方块谓词每秒采样四次，以保护服务端刻时长。
+            int elapsed = server.getTickCount() - group.startedTick;
+            if (group.mode == Mode.CHALLENGE && elapsed >= group.totalTicks) {
+                finish(server, group, false, "时间耗尽", false);
+                continue;
+            }
             if (elapsed % 5 != 0) {
                 continue;
             }
-            LevelConditionEvaluator.Evaluation completion = LevelConditionEvaluator.evaluate(
-                    player.serverLevel(), player, map.level.completionCondition
-            );
-            if (completion.matched()) {
-                iterator.remove();
-                finish(player, session, true, "关卡完成");
-                continue;
-            }
-            String failedRestriction = null;
-            int continuousDamageCount = 0;
-            for (LevelDefinition.RestrictionRule rule : map.level.restrictions) {
-                LevelConditionEvaluator.Evaluation restriction = LevelConditionEvaluator.evaluate(
-                        player.serverLevel(), player, rule.condition
+            Map<UUID, LevelConditionEvaluator.Evaluation> evaluations = new LinkedHashMap<>();
+            boolean allCompleted = true;
+            String failure = null;
+            for (ServerPlayer member : members) {
+                LevelConditionEvaluator.Evaluation completion = LevelConditionEvaluator.evaluate(
+                        level,
+                        member,
+                        map.level.completionCondition
                 );
-                if (!restriction.matched()) {
+                evaluations.put(member.getUUID(), completion);
+                allCompleted &= completion.matched();
+                if (group.mode == Mode.PREVIEW) {
                     continue;
                 }
-                if (rule.punishment == LevelDefinition.Punishment.IMMEDIATE_FAILURE) {
-                    failedRestriction = rule.name;
+                int continuousDamageCount = 0;
+                for (LevelDefinition.RestrictionRule rule : map.level.restrictions) {
+                    boolean matched = LevelConditionEvaluator.evaluate(level, member, rule.condition).matched();
+                    if (!matched) {
+                        continue;
+                    }
+                    if (rule.punishment == LevelDefinition.Punishment.IMMEDIATE_FAILURE) {
+                        failure = member.getScoreboardName() + " 触发限制：“" + rule.name + "”";
+                        break;
+                    }
+                    continuousDamageCount++;
+                }
+                if (failure != null) {
                     break;
                 }
-                continuousDamageCount++;
+                if (continuousDamageCount > 0 && elapsed % 10 == 0) {
+                    member.hurt(member.damageSources().lava(), 4.0F * continuousDamageCount);
+                }
             }
-            if (failedRestriction != null) {
-                iterator.remove();
-                finish(player, session, false, "触发限制：“" + failedRestriction + "”");
+            if (group.finishing) {
                 continue;
             }
-            if (continuousDamageCount > 0 && elapsed % 10 == 0) {
-                // Every matching rule contributes one lava-sized damage unit. / 每条成立规则独立贡献一次熔岩等量伤害。
-                player.hurt(player.damageSources().lava(), 4.0F * continuousDamageCount);
+            if (group.mode == Mode.PREVIEW) {
+                sendStatuses(server, group, map, evaluations);
+            } else if (failure != null) {
+                finish(server, group, false, failure, false);
+            } else if (allCompleted) {
+                finish(server, group, true, "全队完成关卡", false);
+            } else {
+                sendStatuses(server, group, map, evaluations);
             }
-            sendStatus(player, session, completion, "");
         }
-    }
-
-    private static void sendStatus(
-            ServerPlayer player,
-            PlaySession session,
-            LevelConditionEvaluator.Evaluation completion,
-            String result
-    ) {
-        int elapsed = player.server.getTickCount() - session.startedTick;
-        int remaining = Math.max(0, session.totalTicks - elapsed);
-        ModNetwork.send(player, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
-                true,
-                result,
-                remaining,
-                session.totalTicks,
-                completion.matched(),
-                completion.progress()
-        )));
-    }
-
-    private static void finish(ServerPlayer player, PlaySession session, boolean success, String result) {
-        LevelConditionEvaluator.Evaluation completion = success
-                ? new LevelConditionEvaluator.Evaluation(true, java.util.List.of())
-                : new LevelConditionEvaluator.Evaluation(false, java.util.List.of());
-        ModNetwork.send(player, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
-                false,
-                result,
-                0,
-                session.totalTicks,
-                completion.matched(),
-                completion.progress()
-        )));
-        if (success) {
-            LOGGER.info("玩家 [{}] 完成关卡模拟 [地图: {}]", player.getScoreboardName(), session.mapId);
-        } else {
-            LOGGER.info("玩家 [{}] 关卡模拟失败 [地图: {}, 原因: {}]", player.getScoreboardName(), session.mapId, result);
-        }
-    }
-
-    private static Map<UUID, PlaySession> sessions(MinecraftServer server) {
-        return SESSIONS.computeIfAbsent(server, ignored -> new HashMap<>());
     }
 
     /**
-     * Stores immutable runtime identity and timing information.
-     * 保存不可变的运行时身份与计时信息。
+     * Restarts the caller's whole session from a fresh map copy.
+     * 从全新地图副本重新开始调用者所在的完整会话。
+     *
+     * @param player requesting participant / 请求参与者
      */
-    private static final class PlaySession {
-        private final UUID playerId;
-        private final String mapId;
-        private final ResourceKey<Level> dimensionKey;
-        private final int startedTick;
-        private final int totalTicks;
+    public static synchronized void restart(ServerPlayer player) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        if (group == null || !group.active) {
+            throw new IllegalArgumentException("当前没有可重新开始的关卡会话。");
+        }
+        ServerPlayer leader = player.server.getPlayerList().getPlayer(group.leaderId);
+        if (leader == null) {
+            throw new IllegalStateException("关卡发起者已离线，无法重新开始。");
+        }
+        String mapId = group.mapId;
+        Mode mode = group.mode;
+        finish(player.server, group, false, "重新开始关卡", true);
+        begin(leader, mapId, mode);
+    }
 
-        private PlaySession(
-                UUID playerId,
+    /**
+     * Exits a preview or fails and exits the caller's whole team challenge.
+     * 退出预览，或判定调用者所在的完整团队挑战失败并退出。
+     *
+     * @param player requesting participant / 请求参与者
+     */
+    public static synchronized void exit(ServerPlayer player) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        if (group == null) {
+            throw new IllegalArgumentException("当前没有活动关卡会话。");
+        }
+        String reason = group.mode == Mode.PREVIEW ? "已退出关卡预览" : player.getScoreboardName() + " 退出了挑战";
+        finish(player.server, group, false, reason, false);
+    }
+
+    /**
+     * Reports whether a player is protected by challenge interaction restrictions.
+     * 返回玩家是否受挑战交互限制保护。
+     *
+     * @param player target player / 目标玩家
+     * @return whether the player is in an active challenge / 玩家是否处于活动挑战中
+     */
+    public static synchronized boolean isChallengeParticipant(ServerPlayer player) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        return group != null && group.active && !group.finishing && group.mode == Mode.CHALLENGE;
+    }
+
+    /**
+     * Converts a participant death into immediate whole-team failure.
+     * 将参与者死亡转换为立即全队失败。
+     *
+     * @param player dying participant / 即将死亡的参与者
+     * @return whether normal death should be cancelled / 是否应取消正常死亡
+     */
+    public static synchronized boolean failOnDeath(ServerPlayer player) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        if (group == null || !group.active || group.finishing) {
+            return false;
+        }
+        finish(player.server, group, false, player.getScoreboardName() + " 死亡", false);
+        return true;
+    }
+
+    /**
+     * Handles dimension changes and treats every unsanctioned departure as failure or exit.
+     * 处理维度变化，并将任何未授权离场判定为失败或退出。
+     *
+     * @param player moving participant / 正在移动的参与者
+     * @param fromDimension source dimension / 来源维度
+     */
+    public static synchronized void onDimensionChanged(ServerPlayer player, ResourceKey<Level> fromDimension) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        if (group == null || group.finishing || group.transitioning || !group.active) {
+            return;
+        }
+        if (fromDimension.equals(group.dimensionKey)
+                && !player.serverLevel().dimension().equals(group.dimensionKey)) {
+            finish(player.server, group, false, player.getScoreboardName() + " 离开了关卡地图", false);
+        }
+    }
+
+    /**
+     * Restores a disconnecting participant before vanilla persists the player entity.
+     * 在原版持久化玩家实体前恢复正在断线的参与者。
+     *
+     * @param player disconnecting player / 断线玩家
+     * @return whether a formal level session was handled / 是否处理了正式关卡会话
+     */
+    public static synchronized boolean onLogout(ServerPlayer player) {
+        GroupSession group = state(player.server).byPlayer.get(player.getUUID());
+        if (group == null) {
+            return false;
+        }
+        finish(player.server, group, false, player.getScoreboardName() + " 离线", false);
+        return true;
+    }
+
+    /**
+     * Restores a crash-surviving disk backup when a player next logs in.
+     * 玩家下次登录时恢复由崩溃遗留在磁盘上的备份。
+     *
+     * @param player logging-in player / 登录玩家
+     */
+    public static synchronized void restorePendingBackup(ServerPlayer player) {
+        Path path = backupPath(player.server, player.getUUID());
+        if (!Files.isRegularFile(path)) {
+            return;
+        }
+        try {
+            restorePlayer(player);
+            LOGGER.warn("玩家 [{}] 已从遗留的关卡备份中恢复。", player.getScoreboardName());
+        } catch (Exception exception) {
+            LOGGER.error("玩家 [{}] 的遗留关卡备份恢复失败。", player.getScoreboardName(), exception);
+        }
+    }
+
+    /**
+     * Finalizes one whole group, restores players, rewards success, and deletes the dimension.
+     * 结束一个完整小组，恢复玩家、奖励成功并删除维度。
+     */
+    private static void finish(
+            MinecraftServer server,
+            GroupSession group,
+            boolean success,
+            String result,
+            boolean restarting
+    ) {
+        if (group.finishing) {
+            return;
+        }
+        group.finishing = true;
+        group.active = false;
+        List<ServerPlayer> members = resolveOnlineMembers(server, group);
+        for (ServerPlayer member : members) {
+            ModNetwork.send(member, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
+                    false,
+                    group.mapId,
+                    group.mode.name(),
+                    result,
+                    0,
+                    group.totalTicks,
+                    success,
+                    List.of(),
+                    List.of(),
+                    List.of()
+            )));
+        }
+        restoreMembers(server, group);
+        if (success) {
+            grantStage(server, group, members);
+        }
+        discardTrialPockets(server, group);
+        for (UUID memberId : group.memberIds) {
+            DimensionPool.unbind(server, memberId, group.dimensionKey);
+        }
+        DimensionPool.Session detached = DimensionPool.detachDimension(server, group.dimensionKey);
+        if (detached != null) {
+            DimensionPool.deleteDimension(server, detached);
+        }
+        removeGroup(server, group);
+        if (!restarting) {
+            LOGGER.info(
+                    "关卡会话结束 [会话: {}, 地图: {}, 成功: {}, 结果: {}]",
+                    group.id,
+                    group.mapId,
+                    success,
+                    result
+            );
+        }
+    }
+
+    /**
+     * Sends personalized live progress to every online participant.
+     * 向每名在线参与者发送个性化实时进度。
+     */
+    private static void sendStatuses(
+            MinecraftServer server,
+            GroupSession group,
+            MapDefinition map,
+            Map<UUID, LevelConditionEvaluator.Evaluation> evaluations
+    ) {
+        int remaining = group.mode == Mode.PREVIEW
+                ? 0
+                : Math.max(0, group.totalTicks - (server.getTickCount() - group.startedTick));
+        List<ModNetwork.MemberProgress> memberProgress = new ArrayList<>();
+        for (UUID memberId : group.memberIds) {
+            ServerPlayer member = server.getPlayerList().getPlayer(memberId);
+            LevelConditionEvaluator.Evaluation evaluation = evaluations.get(memberId);
+            memberProgress.add(new ModNetwork.MemberProgress(
+                    member == null ? memberId.toString() : member.getScoreboardName(),
+                    evaluation != null && evaluation.matched()
+            ));
+        }
+        for (ServerPlayer member : resolveOnlineMembers(server, group)) {
+            LevelConditionEvaluator.Evaluation completion = evaluations.get(member.getUUID());
+            List<ModNetwork.RuleProgress> restrictions = new ArrayList<>();
+            for (LevelDefinition.RestrictionRule rule : map.level.restrictions) {
+                boolean matched = LevelConditionEvaluator.evaluate(
+                        member.serverLevel(),
+                        member,
+                        rule.condition
+                ).matched();
+                restrictions.add(new ModNetwork.RuleProgress(rule.name, rule.punishment.name(), matched));
+            }
+            ModNetwork.send(member, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
+                    true,
+                    group.mapId,
+                    group.mode.name(),
+                    "",
+                    remaining,
+                    group.mode == Mode.PREVIEW ? 0 : group.totalTicks,
+                    completion != null && completion.matched(),
+                    completion == null ? List.of() : completion.progress(),
+                    restrictions,
+                    memberProgress
+            )));
+        }
+    }
+
+    /**
+     * Atomically persists one complete pre-entry player tag.
+     * 原子持久化一份完整的玩家进入前标签。
+     *
+     * @param player player being backed up / 要备份的玩家
+     * @throws IOException when persistence fails / 持久化失败时抛出
+     */
+    private static void writeBackup(ServerPlayer player) throws IOException {
+        Path path = backupPath(player.server, player.getUUID());
+        if (Files.exists(path)) {
+            throw new IOException("玩家 " + player.getScoreboardName() + " 存在尚未恢复的关卡备份。");
+        }
+        CompoundTag envelope = new CompoundTag();
+        envelope.put("Player", player.saveWithoutId(new CompoundTag()));
+        Files.createDirectories(path.getParent());
+        Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+        try {
+            NbtIo.writeCompressed(envelope, temporary);
+            try {
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+        LOGGER.info("已备份玩家完整关卡前状态 [玩家: {}, 文件: {}]", player.getScoreboardName(), path);
+    }
+
+    /**
+     * Resets one existing player from a synthetic clean-player tag.
+     * 使用合成的干净玩家标签重置现有玩家。
+     *
+     * @param player participant to reset / 要重置的参与者
+     */
+    private static void resetToCleanPlayer(ServerPlayer player) {
+        player.closeContainer();
+        player.removeAllEffects();
+        ServerPlayer cleanPlayer = new ServerPlayer(
+                player.server,
+                player.serverLevel(),
+                player.getGameProfile(),
+                player.clientInformation()
+        );
+        CompoundTag clean = cleanPlayer.saveWithoutId(new CompoundTag());
+        player.load(clean);
+        player.getInventory().clearContent();
+        player.getEnderChestInventory().clearContent();
+        for (String key : new ArrayList<>(player.getPersistentData().getAllKeys())) {
+            player.getPersistentData().remove(key);
+        }
+        player.setHealth(player.getMaxHealth());
+        player.setAbsorptionAmount(0.0F);
+        player.getFoodData().setFoodLevel(20);
+        player.getFoodData().setSaturation(5.0F);
+        player.getFoodData().setExhaustion(0.0F);
+        player.experienceLevel = 0;
+        player.totalExperience = 0;
+        player.experienceProgress = 0.0F;
+        player.getTags().clear();
+        player.onUpdateAbilities();
+        player.inventoryMenu.broadcastFullState();
+    }
+
+    /**
+     * Restores every currently online member while retaining failed disk backups.
+     * 恢复全部当前在线成员，并保留恢复失败的磁盘备份。
+     */
+    private static void restoreMembers(MinecraftServer server, GroupSession group) {
+        for (UUID memberId : group.memberIds) {
+            ServerPlayer member = server.getPlayerList().getPlayer(memberId);
+            if (member != null && Files.isRegularFile(backupPath(server, memberId))) {
+                try {
+                    restorePlayer(member);
+                } catch (Exception exception) {
+                    LOGGER.error("玩家 [{}] 的关卡前状态恢复失败，磁盘备份已保留。", member.getScoreboardName(), exception);
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads one complete player backup and returns the player to its recorded dimension and position.
+     * 加载一份完整玩家备份，并将玩家送回记录的维度与位置。
+     */
+    private static void restorePlayer(ServerPlayer player) throws IOException {
+        Path path = backupPath(player.server, player.getUUID());
+        CompoundTag envelope = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+        CompoundTag saved = envelope.getCompound("Player");
+        if (saved.isEmpty()) {
+            throw new IOException("玩家备份内容为空。");
+        }
+        player.closeContainer();
+        player.removeAllEffects();
+        ResourceKey<Level> targetKey = readDimension(saved);
+        ListTag position = saved.getList("Pos", Tag.TAG_DOUBLE);
+        double x = position.size() >= 3 ? position.getDouble(0) : player.server.overworld().getSharedSpawnPos().getX() + 0.5D;
+        double y = position.size() >= 3 ? position.getDouble(1) : player.server.overworld().getSharedSpawnPos().getY();
+        double z = position.size() >= 3 ? position.getDouble(2) : player.server.overworld().getSharedSpawnPos().getZ() + 0.5D;
+        float yaw = saved.getList("Rotation", Tag.TAG_FLOAT).size() >= 2
+                ? saved.getList("Rotation", Tag.TAG_FLOAT).getFloat(0)
+                : 0.0F;
+        float pitch = saved.getList("Rotation", Tag.TAG_FLOAT).size() >= 2
+                ? saved.getList("Rotation", Tag.TAG_FLOAT).getFloat(1)
+                : 0.0F;
+        player.load(saved);
+        ServerLevel target = player.server.getLevel(targetKey);
+        if (target == null || DimensionPool.sessionForDimension(player.server, targetKey) != null) {
+            target = player.server.overworld();
+        }
+        player.teleportTo(target, x, y, z, Set.of(), yaw, pitch);
+        synchronizeRestoredPlayer(player, saved);
+        Files.delete(path);
+        LOGGER.info("已完整恢复玩家关卡前状态 [玩家: {}]", player.getScoreboardName());
+    }
+
+    /**
+     * Parses a saved player dimension with a safe overworld fallback.
+     * 解析已保存的玩家维度，并安全回退到主世界。
+     */
+    private static ResourceKey<Level> readDimension(CompoundTag playerTag) {
+        ResourceLocation location = ResourceLocation.tryParse(playerTag.getString("Dimension"));
+        return location == null
+                ? Level.OVERWORLD
+                : ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, location);
+    }
+
+    /**
+     * Resynchronizes client-visible state that raw NBT loading does not broadcast.
+     * 重新同步原始 NBT 加载不会主动广播的客户端可见状态。
+     */
+    private static void synchronizeRestoredPlayer(ServerPlayer player, CompoundTag saved) {
+        GameType restoredGameType = GameType.byId(saved.getInt("playerGameType"));
+        player.setGameMode(restoredGameType);
+        player.connection.send(new ClientboundGameEventPacket(
+                ClientboundGameEventPacket.CHANGE_GAME_MODE,
+                restoredGameType.getId()
+        ));
+        player.onUpdateAbilities();
+        player.connection.send(new ClientboundSetExperiencePacket(
+                player.experienceProgress,
+                player.totalExperience,
+                player.experienceLevel
+        ));
+        player.connection.send(new ClientboundSetHealthPacket(
+                player.getHealth(),
+                player.getFoodData().getFoodLevel(),
+                player.getFoodData().getSaturationLevel()
+        ));
+        for (var effect : player.getActiveEffects()) {
+            player.connection.send(new ClientboundUpdateMobEffectPacket(player.getId(), effect, false));
+        }
+        player.inventoryMenu.broadcastFullState();
+        synchronizeStages(player);
+    }
+
+    /**
+     * Finds a matching portal pocket in normal inventory or offhand slots.
+     * 在普通背包或副手槽中查找匹配的门户口袋。
+     */
+    private static ItemStack findPortalPocket(ServerPlayer player, String mapId) {
+        for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (stack.is(CreateGo.FOURTH_DIMENSIONAL_POCKET_ITEM.get())
+                    && mapId.equals(FourthDimensionalPocketStorage.getLevelId(stack))) {
+                return stack;
+            }
+        }
+        ItemStack offhand = player.getOffhandItem();
+        return offhand.is(CreateGo.FOURTH_DIMENSIONAL_POCKET_ITEM.get())
+                && mapId.equals(FourthDimensionalPocketStorage.getLevelId(offhand))
+                ? offhand
+                : ItemStack.EMPTY;
+    }
+
+    /**
+     * Resolves all online FTB Teams members, falling back to the requester alone.
+     * 解析全部在线 FTB Teams 成员，并在不可用时回退为仅请求者。
+     */
+    private static List<ServerPlayer> onlineTeamMembers(ServerPlayer player) {
+        try {
+            Class<?> apiClass = Class.forName("dev.ftb.mods.ftbteams.api.FTBTeamsAPI");
+            Object api = apiClass.getMethod("api").invoke(null);
+            if (!(boolean) api.getClass().getMethod("isManagerLoaded").invoke(api)) {
+                return List.of(player);
+            }
+            Object manager = api.getClass().getMethod("getManager").invoke(api);
+            Object optional = manager.getClass().getMethod("getTeamForPlayer", ServerPlayer.class).invoke(manager, player);
+            Object team = optional.getClass().getMethod("orElse", Object.class).invoke(optional, new Object[]{null});
+            if (team == null) {
+                return List.of(player);
+            }
+            Collection<?> onlineMembers = (Collection<?>) team.getClass().getMethod("getOnlineMembers").invoke(team);
+            List<ServerPlayer> result = onlineMembers.stream()
+                    .filter(ServerPlayer.class::isInstance)
+                    .map(ServerPlayer.class::cast)
+                    .distinct()
+                    .toList();
+            return result.contains(player) ? result : List.of(player);
+        } catch (ClassNotFoundException ignored) {
+            return List.of(player);
+        } catch (ReflectiveOperationException exception) {
+            LOGGER.warn("读取 FTB Teams 在线成员失败，回退为单人挑战。", exception);
+            return List.of(player);
+        }
+    }
+
+    /**
+     * Ensures no selected team member is already isolated or awaiting restoration.
+     * 确保所选队员均未处于隔离会话或等待恢复状态。
+     */
+    private static void validateMembers(MinecraftServer server, List<ServerPlayer> members) {
+        for (ServerPlayer member : members) {
+            if (state(server).byPlayer.containsKey(member.getUUID())) {
+                throw new IllegalArgumentException("队员 " + member.getScoreboardName() + " 已处于关卡会话中。");
+            }
+            if (DimensionPool.activeSession(member) != null) {
+                throw new IllegalArgumentException("队员 " + member.getScoreboardName() + " 正在其他地图会话中。");
+            }
+            if (Files.exists(backupPath(server, member.getUUID()))) {
+                throw new IllegalStateException("队员 " + member.getScoreboardName() + " 存在尚未恢复的关卡备份，请重新登录后再试。");
+            }
+        }
+    }
+
+    /**
+     * Grants the map identifier as both a player and optional FTB team game stage.
+     * 将地图标识作为玩家游戏阶段及可选 FTB 队伍游戏阶段授予。
+     */
+    private static void grantStage(MinecraftServer server, GroupSession group, List<ServerPlayer> members) {
+        for (ServerPlayer member : members) {
+            addPlayerStage(member, group.mapId);
+        }
+        if (members.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> apiClass = Class.forName("dev.ftb.mods.ftbteams.api.FTBTeamsAPI");
+            Object api = apiClass.getMethod("api").invoke(null);
+            Object manager = api.getClass().getMethod("getManager").invoke(api);
+            Object optional = manager.getClass().getMethod("getTeamForPlayer", ServerPlayer.class).invoke(manager, members.getFirst());
+            Object team = optional.getClass().getMethod("orElse", Object.class).invoke(optional, new Object[]{null});
+            if (team != null) {
+                Class<?> teamClass = Class.forName("dev.ftb.mods.ftbteams.api.Team");
+                Class<?> helperClass = Class.forName("dev.ftb.mods.ftbteams.api.TeamStagesHelper");
+                Method addStage = helperClass.getMethod("addTeamStage", teamClass, String.class);
+                addStage.invoke(null, team, group.mapId);
+            }
+        } catch (ClassNotFoundException ignored) {
+            // Player scoreboard tags remain the KubeJS stage fallback. / 玩家记分板标签仍作为 KubeJS 游戏阶段回退实现。
+        } catch (ReflectiveOperationException exception) {
+            LOGGER.warn("同步 FTB Teams 队伍游戏阶段失败，已保留逐玩家阶段。", exception);
+        }
+        LOGGER.info("向成功队伍授予同名游戏阶段 [关卡: {}, 玩家数: {}]", group.mapId, members.size());
+    }
+
+    /**
+     * Adds and synchronizes one KubeJS player stage with a scoreboard-tag fallback.
+     * 添加并同步一个 KubeJS 玩家阶段，并以记分板标签作为回退。
+     */
+    private static void addPlayerStage(ServerPlayer player, String stage) {
+        try {
+            Object stages = player.getClass().getMethod("kjs$getStages").invoke(player);
+            stages.getClass().getMethod("add", String.class).invoke(stages, stage);
+        } catch (ReflectiveOperationException exception) {
+            player.addTag(stage);
+            LOGGER.debug("KubeJS 游戏阶段接口不可用，已使用玩家标签回退 [玩家: {}, 阶段: {}]", player.getScoreboardName(), stage);
+        }
+    }
+
+    /**
+     * Requests KubeJS stage synchronization after raw player restoration.
+     * 在原始玩家恢复后请求 KubeJS 阶段同步。
+     */
+    private static void synchronizeStages(ServerPlayer player) {
+        try {
+            Object stages = player.getClass().getMethod("kjs$getStages").invoke(player);
+            stages.getClass().getMethod("sync").invoke(stages);
+        } catch (ReflectiveOperationException exception) {
+            LOGGER.debug("玩家 [{}] 的 KubeJS 游戏阶段无需或无法显式同步。", player.getScoreboardName());
+        }
+    }
+
+    /**
+     * Resolves currently connected players in stable group order.
+     * 按稳定小组顺序解析当前已连接玩家。
+     */
+    private static List<ServerPlayer> resolveOnlineMembers(MinecraftServer server, GroupSession group) {
+        List<ServerPlayer> players = new ArrayList<>();
+        for (UUID memberId : group.memberIds) {
+            ServerPlayer player = server.getPlayerList().getPlayer(memberId);
+            if (player != null) {
+                players.add(player);
+            }
+        }
+        return players;
+    }
+
+    /**
+     * Deletes all remaining one-time structure files owned by a session.
+     * 删除会话拥有的全部剩余一次性结构文件。
+     */
+    private static void discardTrialPockets(MinecraftServer server, GroupSession group) {
+        for (ItemStack pocket : group.trialPockets) {
+            FourthDimensionalPocketStorage.discardTrialCopy(server, pocket);
+        }
+        group.trialPockets.clear();
+    }
+
+    /**
+     * Resolves the durable backup path for one player.
+     * 解析一名玩家的持久备份路径。
+     */
+    private static Path backupPath(MinecraftServer server, UUID playerId) {
+        return server.getWorldPath(LevelResource.ROOT)
+                .resolve("data")
+                .resolve("creatego")
+                .resolve(BACKUP_DIRECTORY)
+                .resolve(playerId + ".nbt");
+    }
+
+    /**
+     * Returns the mutable runtime indices for one server.
+     * 返回一个服务端的可变运行时索引。
+     */
+    private static RuntimeState state(MinecraftServer server) {
+        return STATES.computeIfAbsent(server, ignored -> new RuntimeState());
+    }
+
+    /**
+     * Removes all dimension and member indices for a completed group.
+     * 移除已结束小组的全部维度与成员索引。
+     */
+    private static void removeGroup(MinecraftServer server, GroupSession group) {
+        RuntimeState state = state(server);
+        state.byDimension.remove(group.dimensionKey);
+        for (UUID memberId : group.memberIds) {
+            state.byPlayer.remove(memberId, group);
+        }
+    }
+
+    /**
+     * Stores all runtime indices for one server.
+     * 保存一个服务端的全部运行时索引。
+     */
+    private static final class RuntimeState {
+        private final Map<ResourceKey<Level>, GroupSession> byDimension = new HashMap<>();
+        private final Map<UUID, GroupSession> byPlayer = new HashMap<>();
+    }
+
+    /**
+     * Stores one pending or active preview/challenge group.
+     * 保存一个待进入或活动中的预览/挑战小组。
+     */
+    private static final class GroupSession {
+        private final UUID id;
+        private final Mode mode;
+        private final String mapId;
+        private final UUID leaderId;
+        private final List<UUID> memberIds;
+        private final ResourceKey<Level> dimensionKey;
+        private final ItemStack portalTemplate;
+        private final int totalTicks;
+        private final List<ItemStack> trialPockets = new ArrayList<>();
+        private int startedTick;
+        private boolean transitioning;
+        private boolean active;
+        private boolean finishing;
+
+        private GroupSession(
+                UUID id,
+                Mode mode,
                 String mapId,
+                UUID leaderId,
+                List<UUID> memberIds,
                 ResourceKey<Level> dimensionKey,
-                int startedTick,
+                ItemStack portalTemplate,
                 int totalTicks
         ) {
-            this.playerId = playerId;
+            this.id = id;
+            this.mode = mode;
             this.mapId = mapId;
+            this.leaderId = leaderId;
+            this.memberIds = memberIds;
             this.dimensionKey = dimensionKey;
-            this.startedTick = startedTick;
+            this.portalTemplate = portalTemplate;
             this.totalTicks = totalTicks;
         }
     }

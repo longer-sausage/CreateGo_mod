@@ -237,6 +237,37 @@ public final class ModNetwork {
     }
 
     /**
+     * Opens the public details screen for a playable level portal.
+     * 打开可游玩关卡门户的公开详情界面。
+     *
+     * @param player target player / 目标玩家
+     * @param mapId portal level identifier / 门户关卡标识
+     */
+    public static void openLevelDetails(ServerPlayer player, String mapId) {
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapId);
+        if (map == null || map.level == null) {
+            error(player, "四次元口袋绑定的关卡不存在：" + mapId);
+            return;
+        }
+        LevelConditionEvaluator.validate(map.level);
+        send(player, "open_level_details", ModStore.toJson(new LevelDetailsView(
+                map.id,
+                map.terrainType == null ? MapDefinition.TerrainType.FLAT.name() : map.terrainType.name(),
+                map.level.timeLimitSeconds,
+                map.structures == null ? 0 : map.structures.size(),
+                map.npcs == null ? 0 : map.npcs.size(),
+                LevelConditionEvaluator.describe(map.level.completionCondition),
+                map.level.restrictions.stream()
+                        .map(rule -> new RestrictionView(
+                                rule.name,
+                                rule.punishment.name(),
+                                LevelConditionEvaluator.describe(rule.condition)
+                        ))
+                        .toList()
+        )));
+    }
+
+    /**
      * Defines one structure placement update.
      * 定义一个结构放置设置更新。
      */
@@ -348,34 +379,121 @@ public final class ModNetwork {
     }
 
     /**
+     * Defines the read-only information displayed before entering a level.
+     * 定义进入关卡前显示的只读信息。
+     */
+    public static final class LevelDetailsView {
+        public String mapId = "";
+        public String terrainType = "";
+        public int timeLimitSeconds;
+        public int structureCount;
+        public int npcCount;
+        public java.util.List<String> completionConditions = java.util.List.of();
+        public java.util.List<RestrictionView> restrictions = java.util.List.of();
+
+        public LevelDetailsView() {
+        }
+
+        public LevelDetailsView(
+                String mapId,
+                String terrainType,
+                int timeLimitSeconds,
+                int structureCount,
+                int npcCount,
+                java.util.List<String> completionConditions,
+                java.util.List<RestrictionView> restrictions
+        ) {
+            this.mapId = mapId;
+            this.terrainType = terrainType;
+            this.timeLimitSeconds = timeLimitSeconds;
+            this.structureCount = structureCount;
+            this.npcCount = npcCount;
+            this.completionConditions = completionConditions;
+            this.restrictions = restrictions;
+        }
+    }
+
+    /**
+     * Defines one restriction summary for details and in-level menus.
+     * 定义一条供详情界面和关卡菜单使用的限制摘要。
+     */
+    public static final class RestrictionView {
+        public String name = "";
+        public String punishment = "";
+        public java.util.List<String> conditions = java.util.List.of();
+
+        public RestrictionView() {
+        }
+
+        public RestrictionView(String name, String punishment, java.util.List<String> conditions) {
+            this.name = name;
+            this.punishment = punishment;
+            this.conditions = conditions;
+        }
+    }
+
+    /**
      * Defines one server-authoritative play-state update for the HUD.
      * 定义一条供 HUD 使用的服务端权威游玩状态更新。
      */
     public static final class LevelPlayStatus {
         public boolean active;
+        public String mapId = "";
+        public String mode = "";
         public String result = "";
         public int remainingTicks;
         public int totalTicks;
         public boolean completionMatched;
         public java.util.List<LevelConditionEvaluator.Progress> progress = java.util.List.of();
+        public java.util.List<RuleProgress> restrictions = java.util.List.of();
+        public java.util.List<MemberProgress> members = java.util.List.of();
 
         public LevelPlayStatus() {
         }
 
         public LevelPlayStatus(
                 boolean active,
+                String mapId,
+                String mode,
                 String result,
                 int remainingTicks,
                 int totalTicks,
                 boolean completionMatched,
-                java.util.List<LevelConditionEvaluator.Progress> progress
+                java.util.List<LevelConditionEvaluator.Progress> progress,
+                java.util.List<RuleProgress> restrictions,
+                java.util.List<MemberProgress> members
         ) {
             this.active = active;
+            this.mapId = mapId;
+            this.mode = mode;
             this.result = result;
             this.remainingTicks = remainingTicks;
             this.totalTicks = totalTicks;
             this.completionMatched = completionMatched;
             this.progress = progress;
+            this.restrictions = restrictions;
+            this.members = members;
         }
+    }
+
+    /**
+     * Carries one live restriction result.
+     * 携带一条实时限制结果。
+     *
+     * @param name rule name / 规则名称
+     * @param punishment punishment identifier / 惩罚标识
+     * @param matched whether currently triggered / 当前是否已触发
+     */
+    public record RuleProgress(String name, String punishment, boolean matched) {
+    }
+
+    /**
+     * Carries one team member's completion state.
+     * 携带一名队员的完成状态。
+     *
+     * @param name player name / 玩家名称
+     * @param completed whether this member currently satisfies completion / 该成员当前是否满足过关条件
+     */
+    public record MemberProgress(String name, boolean completed) {
     }
 }

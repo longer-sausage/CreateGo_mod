@@ -13,11 +13,15 @@ import dev.ryanhcode.sable.Sable;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.InteractionResultHolder;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.level.Level;
 
 import java.util.List;
 
@@ -46,6 +50,16 @@ public final class FourthDimensionalPocketItem extends Item {
     @Override
     public InteractionResult useOn(UseOnContext context) {
         ItemStack stack = context.getItemInHand();
+        if (context.getPlayer() != null && context.getPlayer().isShiftKeyDown()
+                && !FourthDimensionalPocketStorage.getLevelId(stack).isBlank()) {
+            if (context.getPlayer() instanceof ServerPlayer player) {
+                com.longersausage.creatego.network.ModNetwork.openLevelDetails(
+                        player,
+                        FourthDimensionalPocketStorage.getLevelId(stack)
+                );
+            }
+            return InteractionResult.SUCCESS;
+        }
         boolean filled = FourthDimensionalPocketStorage.isFilled(stack);
         if (context.getLevel().isClientSide()) {
             // Only consume an empty-pocket click when it actually targets a Sable plot.
@@ -73,6 +87,28 @@ public final class FourthDimensionalPocketItem extends Item {
     }
 
     /**
+     * Opens level details when a portal pocket is used while sneaking in the air.
+     * 玩家潜行并在空气中使用门户口袋时打开关卡详情。
+     *
+     * @param level current level / 当前世界
+     * @param player using player / 使用玩家
+     * @param hand used hand / 使用手
+     * @return interaction result and held stack / 交互结果及手持物品
+     */
+    @Override
+    public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+        ItemStack stack = player.getItemInHand(hand);
+        String levelId = FourthDimensionalPocketStorage.getLevelId(stack);
+        if (!player.isShiftKeyDown() || levelId.isBlank()) {
+            return InteractionResultHolder.pass(stack);
+        }
+        if (player instanceof ServerPlayer serverPlayer) {
+            com.longersausage.creatego.network.ModNetwork.openLevelDetails(serverPlayer, levelId);
+        }
+        return InteractionResultHolder.success(stack);
+    }
+
+    /**
      * Adds the current storage state to the item tooltip.
      * 将当前存储状态添加到物品提示中。
      *
@@ -83,6 +119,13 @@ public final class FourthDimensionalPocketItem extends Item {
      */
     @Override
     public void appendHoverText(ItemStack stack, TooltipContext context, List<Component> tooltip, TooltipFlag flag) {
+        String levelId = FourthDimensionalPocketStorage.getLevelId(stack);
+        if (!levelId.isBlank()) {
+            tooltip.add(Component.translatable("tooltip.creatego.fourth_dimensional_pocket.level", levelId)
+                    .withStyle(ChatFormatting.GOLD));
+            tooltip.add(Component.translatable("tooltip.creatego.fourth_dimensional_pocket.level_usage")
+                    .withStyle(ChatFormatting.DARK_GRAY));
+        }
         Component storedName = FourthDimensionalPocketStorage.getStoredName(stack);
         if (storedName == null) {
             tooltip.add(Component.translatable("tooltip.creatego.fourth_dimensional_pocket.empty")

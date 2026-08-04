@@ -82,6 +82,12 @@ public final class ClientController {
                     minecraft.setScreen(new LevelRestrictionScreen(view));
                 }
             }
+            case "open_level_details" -> {
+                ModNetwork.LevelDetailsView view = ModStore.fromJson(payload.json(), ModNetwork.LevelDetailsView.class);
+                if (view != null) {
+                    minecraft.setScreen(new LevelDetailsScreen(view));
+                }
+            }
             case "level_play_status" -> {
                 levelPlayStatus = ModStore.fromJson(payload.json(), ModNetwork.LevelPlayStatus.class);
                 if (levelPlayStatus != null && !levelPlayStatus.active) {
@@ -132,6 +138,17 @@ public final class ClientController {
             levelPlayStatus = null;
         }
         return levelPlayStatus;
+    }
+
+    /**
+     * Opens the in-level menu from the latest server-authoritative status.
+     * 使用最新的服务端权威状态打开关卡内菜单。
+     */
+    public static void openLevelMenu() {
+        ModNetwork.LevelPlayStatus status = levelPlayStatus();
+        if (status != null && status.active) {
+            Minecraft.getInstance().setScreen(new LevelMenuScreen(status));
+        }
     }
 
     /**

@@ -85,6 +85,46 @@ public final class LevelConditionEvaluator {
         }
     }
 
+    /**
+     * Produces stable, value-oriented descriptions without requiring a live level.
+     * 在不依赖实时世界的情况下生成稳定且面向配置值的条件说明。
+     *
+     * @param root condition tree root / 条件树根节点
+     * @return readable leaf descriptions / 可读叶节点说明
+     */
+    public static List<String> describe(LevelDefinition.ConditionNode root) {
+        List<String> descriptions = new ArrayList<>();
+        describeNode(root, descriptions);
+        return descriptions;
+    }
+
+    /**
+     * Appends readable descriptions for every predicate leaf.
+     * 为每个谓词叶节点追加可读说明。
+     */
+    private static void describeNode(LevelDefinition.ConditionNode node, List<String> descriptions) {
+        if (node == null || node.type == null) {
+            return;
+        }
+        if (node.isLogic()) {
+            for (LevelDefinition.ConditionNode child : node.children) {
+                describeNode(child, descriptions);
+            }
+            return;
+        }
+        String comparison = comparisonSymbol(node.comparison) + " " + formatNumber(node.value);
+        descriptions.add(switch (node.type) {
+            case PLAYER_DISTANCE -> "玩家到 " + formatPoint(node) + " 的距离 " + comparison;
+            case PLAYER_COORDINATE -> "玩家 " + node.axis + " 坐标 " + comparison;
+            case ENTITY_COUNT -> node.entityType + " 数量 " + comparison;
+            case ENTITY_DISTANCE -> node.entityType + " 到 " + formatPoint(node) + " 的距离 " + comparison;
+            case ENTITY_COORDINATE -> node.entityType + " 的 " + node.axis + " 坐标 " + comparison;
+            case PLAYER_TOUCHING_BLOCK -> "玩家接触 " + node.blockId;
+            case SUBJECT_BLOCK_DISTANCE -> "目标到最近 " + node.blockId + " 的距离 " + comparison;
+            default -> node.type.name();
+        });
+    }
+
     private static void validateNode(LevelDefinition.ConditionNode node, int depth, int[] count) {
         if (node == null || node.type == null) {
             throw new IllegalArgumentException("条件树包含空节点或未知类型。");
