@@ -21,8 +21,6 @@ import com.longersausage.creatego.server.LevelConditionEvaluator;
 import com.longersausage.creatego.server.ModService;
 import com.longersausage.creatego.server.UploadManager;
 import net.minecraft.server.level.ServerPlayer;
-import net.neoforged.api.distmarker.Dist;
-import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
@@ -58,18 +56,16 @@ public final class ModNetwork {
                 UploadChunkPayload.STREAM_CODEC,
                 ModNetwork::handleUploadChunk
         );
-        if (FMLEnvironment.dist == Dist.CLIENT) {
-            registrar.playToClient(
-                    ClientboundSyncPayload.TYPE,
-                    ClientboundSyncPayload.STREAM_CODEC,
-                    ClientController::handleSync
-            );
-            registrar.playToClient(
-                    ClientboundSkinPayload.TYPE,
-                    ClientboundSkinPayload.STREAM_CODEC,
-                    ClientController::handleSkin
-            );
-        }
+        registrar.playToClient(
+                ClientboundSyncPayload.TYPE,
+                ClientboundSyncPayload.STREAM_CODEC,
+                (payload, context) -> ClientController.handleSync(payload, context)
+        );
+        registrar.playToClient(
+                ClientboundSkinPayload.TYPE,
+                ClientboundSkinPayload.STREAM_CODEC,
+                (payload, context) -> ClientController.handleSkin(payload, context)
+        );
     }
 
     /**
