@@ -87,6 +87,14 @@ public final class LevelEditorScreen extends BaseScreen {
         addRenderableWidget(ModernButton.create(Component.literal("保存设置"), button -> save())
                 .bounds(left + 20, top + 192, 135, 26)
                 .variant(ModernButton.Variant.PRIMARY).build());
+        ModNetwork.LevelPlayStatus currentStatus = ClientController.levelPlayStatus();
+        boolean simulating = currentStatus != null
+                && currentStatus.active
+                && "SIMULATION".equals(currentStatus.mode);
+        addRenderableWidget(ModernButton.create(
+                Component.literal(simulating ? "停止模拟" : "模拟游玩"),
+                button -> simulate(simulating)
+        ).bounds(left + 165, top + 192, 135, 26).build());
         addRenderableWidget(ModernButton.create(Component.literal("删除关卡"), button -> deleteLevel())
                 .bounds(left + 310, top + 192, 140, 26)
                 .variant(ModernButton.Variant.DANGER).build());
@@ -126,6 +134,25 @@ public final class LevelEditorScreen extends BaseScreen {
         if (parseTime()) {
             ScreenHelper.send("save_level", view);
         }
+    }
+
+    /**
+     * Starts or stops editor simulation with the latest unsaved level settings.
+     * 使用最新未保存的关卡设置开始或停止编辑器模拟。
+     *
+     * @param simulating whether this player already has an editor simulation / 玩家当前是否正在编辑器模拟
+     */
+    private void simulate(boolean simulating) {
+        if (simulating) {
+            ScreenHelper.send("stop_level_simulation", new Object());
+            onClose();
+            return;
+        }
+        if (!parseTime()) {
+            return;
+        }
+        ScreenHelper.send("start_level_simulation", view);
+        onClose();
     }
 
     private void deleteLevel() {

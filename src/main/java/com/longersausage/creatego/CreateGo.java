@@ -9,7 +9,6 @@
 package com.longersausage.creatego;
 
 import com.longersausage.creatego.entity.NpcEntity;
-import com.longersausage.creatego.item.FourthDimensionalPocketItem;
 import com.longersausage.creatego.item.LevelEditorItem;
 import com.longersausage.creatego.item.MapEditorItem;
 import com.longersausage.creatego.item.NpcEditorItem;
@@ -63,21 +62,15 @@ public final class CreateGo {
             "level_editor",
             () -> new LevelEditorItem(new Item.Properties().stacksTo(1))
     );
-    public static final DeferredHolder<Item, FourthDimensionalPocketItem> FOURTH_DIMENSIONAL_POCKET_ITEM = ITEMS.register(
-            "fourth_dimensional_pocket",
-            () -> new FourthDimensionalPocketItem(new Item.Properties().stacksTo(1))
-    );
-
     public static final DeferredHolder<CreativeModeTab, CreativeModeTab> CREATIVE_MODE_TAB = CREATIVE_MODE_TABS.register(
             "creatego",
             () -> CreativeModeTab.builder()
                     .title(Component.translatable("itemGroup." + MOD_ID))
-                    .icon(() -> new ItemStack(FOURTH_DIMENSIONAL_POCKET_ITEM.get()))
+                    .icon(() -> new ItemStack(MAP_EDITOR_ITEM.get()))
                     .displayItems((parameters, output) -> {
                         output.accept(MAP_EDITOR_ITEM.get());
                         output.accept(NPC_EDITOR_ITEM.get());
                         output.accept(LEVEL_EDITOR_ITEM.get());
-                        output.accept(FOURTH_DIMENSIONAL_POCKET_ITEM.get());
                     })
                     .build()
     );

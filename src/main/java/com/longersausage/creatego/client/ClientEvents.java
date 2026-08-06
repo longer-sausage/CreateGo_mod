@@ -8,13 +8,17 @@
 
 package com.longersausage.creatego.client;
 
+import com.longersausage.creatego.server.LevelVehicleContainer;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.api.distmarker.OnlyIn;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.event.entity.player.ItemTooltipEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +65,27 @@ public final class ClientEvents {
         while (ClientModEvents.LEVEL_MENU_KEY.consumeClick()) {
             ClientController.openLevelMenu();
         }
+    }
+
+    /**
+     * Restores the level portal hint on NBT-bound spatial containers.
+     * 在绑定 NBT 的空间收纳器上恢复关卡门户提示。
+     *
+     * @param event item tooltip event / 物品提示事件
+     */
+    @SubscribeEvent
+    public static void onItemTooltip(ItemTooltipEvent event) {
+        if (!LevelVehicleContainer.isPortalContainer(event.getItemStack())) {
+            return;
+        }
+        String levelId = LevelVehicleContainer.getLevelId(event.getItemStack());
+        if (levelId.isBlank()) {
+            return;
+        }
+        event.getToolTip().add(Component.translatable("tooltip.creatego.level_portal.level", levelId)
+                .withStyle(ChatFormatting.GOLD));
+        event.getToolTip().add(Component.translatable("tooltip.creatego.level_portal.usage")
+                .withStyle(ChatFormatting.DARK_GRAY));
     }
 
     /**

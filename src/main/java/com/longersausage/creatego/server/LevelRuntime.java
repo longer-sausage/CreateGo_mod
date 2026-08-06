@@ -1,6 +1,6 @@
 /*
- * Runs isolated preview and team challenge sessions for CreateGo levels.
- * 运行相互隔离的 CreateGo 关卡预览与团队挑战会话。
+ * Runs editor simulations plus isolated preview and team challenge sessions for CreateGo levels.
+ * 运行 CreateGo 关卡编辑器模拟，以及相互隔离的预览与团队挑战会话。
  *
  * Author: CreateGo
  * Date: 2026-08-05
@@ -8,7 +8,6 @@
 
 package com.longersausage.creatego.server;
 
-import com.longersausage.creatego.CreateGo;
 import com.longersausage.creatego.data.LevelDefinition;
 import com.longersausage.creatego.data.MapDefinition;
 import com.longersausage.creatego.data.ModStore;
@@ -72,6 +71,73 @@ public final class LevelRuntime {
     }
 
     /**
+     * Starts an editor-only simulation inside the player's currently bound map dimension.
+     * 在玩家当前绑定的地图维度内开始仅供编辑器使用的模拟。
+     *
+     * @param player requesting editor / 请求模拟的编辑者
+     */
+    public static synchronized void startSimulation(ServerPlayer player) {
+        RuntimeState state = state(player.server);
+        if (state.byPlayer.containsKey(player.getUUID())) {
+            throw new IllegalStateException("请先退出当前关卡会话。");
+        }
+        if (state.simulations.containsKey(player.getUUID())) {
+            throw new IllegalStateException("当前已在模拟关卡。");
+        }
+        DimensionPool.Session mapSession = DimensionPool.activeSession(player);
+        if (mapSession == null) {
+            throw new IllegalArgumentException("请先进入并绑定一张地图。");
+        }
+        MapDefinition map = ModStore.get(player.server).state().maps.get(mapSession.mapId());
+        if (map == null || map.level == null) {
+            throw new IllegalArgumentException("当前地图尚未注册为关卡。");
+        }
+        LevelConditionEvaluator.validate(map.level);
+        EditorSimulation simulation = new EditorSimulation(
+                player.getUUID(),
+                map.id,
+                player.serverLevel().dimension(),
+                player.server.getTickCount(),
+                Math.max(20, map.level.timeLimitSeconds * 20)
+        );
+        state.simulations.put(player.getUUID(), simulation);
+        player.setHealth(player.getMaxHealth());
+        player.teleportTo(
+                player.serverLevel(),
+                map.spawnX + 0.5D,
+                map.spawnY,
+                map.spawnZ + 0.5D,
+                Set.of(),
+                map.direction.yaw,
+                0.0F
+        );
+        LevelConditionEvaluator.Evaluation completion = LevelConditionEvaluator.evaluate(
+                player.serverLevel(), player, map.level.completionCondition
+        );
+        sendSimulationStatus(player, simulation, map, completion, "");
+        LOGGER.info(
+                "玩家 [{}] 开始编辑器关卡模拟 [地图: {}, 时限: {} 秒]",
+                player.getScoreboardName(),
+                map.id,
+                map.level.timeLimitSeconds
+        );
+    }
+
+    /**
+     * Stops the player's editor simulation without affecting a formal level session.
+     * 停止玩家的编辑器模拟，且不影响正式关卡会话。
+     *
+     * @param player target editor / 目标编辑者
+     */
+    public static synchronized void stopSimulation(ServerPlayer player) {
+        EditorSimulation removed = state(player.server).simulations.remove(player.getUUID());
+        if (removed == null) {
+            return;
+        }
+        finishSimulation(player, removed, false, "已停止模拟");
+    }
+
+    /**
      * Starts a preview or challenge after validating the portal and all online team members.
      * 校验门户与全部在线队员后开始预览或挑战。
      *
@@ -86,12 +152,15 @@ public final class LevelRuntime {
             throw new IllegalArgumentException("关卡不存在：" + mapId);
         }
         LevelConditionEvaluator.validate(map.level);
-        ItemStack portal = findPortalPocket(player, mapId);
+        ItemStack portal = findPortalContainer(player, mapId, false);
         if (portal.isEmpty()) {
-            throw new IllegalArgumentException("请手持或携带绑定此关卡的四次元口袋。");
+            throw new IllegalArgumentException("请手持或携带绑定此关卡的空间收纳器。");
         }
-        if (mode == Mode.CHALLENGE && !FourthDimensionalPocketStorage.isFilled(portal)) {
-            throw new IllegalArgumentException("开始挑战需要四次元口袋中装有物理结构。");
+        if (mode == Mode.CHALLENGE && !LevelVehicleContainer.hasStoredVehicle(portal)) {
+            portal = findPortalContainer(player, mapId, true);
+            if (portal.isEmpty()) {
+                throw new IllegalArgumentException("开始挑战需要空间收纳器中装有载具。");
+            }
         }
         List<ServerPlayer> members = mode == Mode.CHALLENGE ? onlineTeamMembers(player) : List.of(player);
         validateMembers(player.server, members);
@@ -129,7 +198,7 @@ public final class LevelRuntime {
      * @param dimensionSession map dimension session / 地图维度会话
      * @param map map definition / 地图定义
      * @return whether the dimension belongs to a formal level session / 该维度是否属于正式关卡会话
-     * @throws IOException when a backup or trial pocket cannot be created / 无法创建备份或试用口袋时抛出
+     * @throws IOException when a backup or trial container cannot be created / 无法创建备份或试用收纳器时抛出
      */
     public static synchronized boolean onMapPopulated(
             ServerPlayer owner,
@@ -149,21 +218,18 @@ public final class LevelRuntime {
         }
         try {
             if (group.mode == Mode.CHALLENGE) {
-                for (ServerPlayer ignored : members) {
-                    group.trialPockets.add(FourthDimensionalPocketStorage.createTrialCopy(owner.server, group.portalTemplate));
-                }
+                group.trialContainer = LevelVehicleContainer.createTrialContainer(group.portalTemplate);
             }
             for (ServerPlayer member : members) {
                 writeBackup(member);
             }
-            for (int index = 0; index < members.size(); index++) {
-                ServerPlayer member = members.get(index);
+            for (ServerPlayer member : members) {
                 resetToCleanPlayer(member);
                 // Survival preserves ordinary right-click item use; server events still forbid combat and block edits.
                 // 生存模式保留普通右键物品使用；服务端事件仍会禁止战斗和方块编辑。
                 member.setGameMode(group.mode == Mode.PREVIEW ? GameType.SPECTATOR : GameType.SURVIVAL);
-                if (group.mode == Mode.CHALLENGE) {
-                    member.getInventory().setItem(0, group.trialPockets.get(index).copy());
+                if (group.mode == Mode.CHALLENGE && member.getUUID().equals(group.leaderId)) {
+                    member.getInventory().setItem(0, group.trialContainer.copy());
                     member.getInventory().selected = 0;
                 }
                 DimensionPool.prepareEntry(member, group.dimensionKey);
@@ -196,7 +262,7 @@ public final class LevelRuntime {
         } catch (Exception exception) {
             group.transitioning = false;
             restoreMembers(owner.server, group);
-            discardTrialPockets(owner.server, group);
+            discardTrialContainers(group);
             removeGroup(owner.server, group);
             if (exception instanceof IOException ioException) {
                 throw ioException;
@@ -282,6 +348,153 @@ public final class LevelRuntime {
                 sendStatuses(server, group, map, evaluations);
             }
         }
+        tickSimulations(server);
+    }
+
+    /**
+     * Evaluates every editor simulation without applying formal challenge isolation or rewards.
+     * 计算全部编辑器模拟，且不应用正式挑战的隔离与奖励。
+     *
+     * @param server running server / 正在运行的服务端
+     */
+    private static void tickSimulations(MinecraftServer server) {
+        RuntimeState state = state(server);
+        for (EditorSimulation simulation : new ArrayList<>(state.simulations.values())) {
+            ServerPlayer player = server.getPlayerList().getPlayer(simulation.playerId);
+            MapDefinition map = ModStore.get(server).state().maps.get(simulation.mapId);
+            if (player == null) {
+                state.simulations.remove(simulation.playerId, simulation);
+                continue;
+            }
+            if (map == null || map.level == null
+                    || !player.serverLevel().dimension().equals(simulation.dimensionKey)) {
+                state.simulations.remove(simulation.playerId, simulation);
+                finishSimulation(player, simulation, false, "模拟已中断");
+                continue;
+            }
+            if (player.isDeadOrDying()) {
+                state.simulations.remove(simulation.playerId, simulation);
+                finishSimulation(player, simulation, false, "闯关者死亡");
+                continue;
+            }
+            int elapsed = server.getTickCount() - simulation.startedTick;
+            if (elapsed >= simulation.totalTicks) {
+                state.simulations.remove(simulation.playerId, simulation);
+                finishSimulation(player, simulation, false, "时间耗尽");
+                continue;
+            }
+            // Complex predicates are sampled four times per second to protect server tick time.
+            // 复杂谓词每秒采样四次，以保护服务端刻耗时。
+            if (elapsed % 5 != 0) {
+                continue;
+            }
+            LevelConditionEvaluator.Evaluation completion = LevelConditionEvaluator.evaluate(
+                    player.serverLevel(), player, map.level.completionCondition
+            );
+            if (completion.matched()) {
+                state.simulations.remove(simulation.playerId, simulation);
+                finishSimulation(player, simulation, true, "关卡完成");
+                continue;
+            }
+            String failedRestriction = null;
+            int continuousDamageCount = 0;
+            for (LevelDefinition.RestrictionRule rule : map.level.restrictions) {
+                boolean matched = LevelConditionEvaluator.evaluate(player.serverLevel(), player, rule.condition).matched();
+                if (!matched) {
+                    continue;
+                }
+                if (rule.punishment == LevelDefinition.Punishment.IMMEDIATE_FAILURE) {
+                    failedRestriction = rule.name;
+                    break;
+                }
+                continuousDamageCount++;
+            }
+            if (failedRestriction != null) {
+                state.simulations.remove(simulation.playerId, simulation);
+                finishSimulation(player, simulation, false, "触发限制：“" + failedRestriction + "”");
+                continue;
+            }
+            if (continuousDamageCount > 0 && elapsed % 10 == 0) {
+                player.hurt(player.damageSources().lava(), 4.0F * continuousDamageCount);
+            }
+            sendSimulationStatus(player, simulation, map, completion, "");
+        }
+    }
+
+    /**
+     * Sends one editor simulation status using the current formal status payload shape.
+     * 使用当前正式状态载荷格式发送一条编辑器模拟状态。
+     *
+     * @param player target editor / 目标编辑者
+     * @param simulation active simulation / 活动模拟
+     * @param map current map definition / 当前地图定义
+     * @param completion current completion evaluation / 当前过关条件计算结果
+     * @param result optional result text / 可选结果文本
+     */
+    private static void sendSimulationStatus(
+            ServerPlayer player,
+            EditorSimulation simulation,
+            MapDefinition map,
+            LevelConditionEvaluator.Evaluation completion,
+            String result
+    ) {
+        int elapsed = player.server.getTickCount() - simulation.startedTick;
+        int remaining = Math.max(0, simulation.totalTicks - elapsed);
+        List<ModNetwork.RuleProgress> restrictions = map.level.restrictions.stream()
+                .map(rule -> new ModNetwork.RuleProgress(
+                        rule.name,
+                        rule.punishment.name(),
+                        LevelConditionEvaluator.evaluate(player.serverLevel(), player, rule.condition).matched()
+                ))
+                .toList();
+        ModNetwork.send(player, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
+                true,
+                simulation.mapId,
+                "SIMULATION",
+                result,
+                remaining,
+                simulation.totalTicks,
+                completion.matched(),
+                completion.progress(),
+                restrictions,
+                List.of(new ModNetwork.MemberProgress(player.getScoreboardName(), completion.matched()))
+        )));
+    }
+
+    /**
+     * Completes one editor simulation and reports its final result.
+     * 完成一次编辑器模拟并报告最终结果。
+     *
+     * @param player target editor / 目标编辑者
+     * @param simulation completed simulation / 已完成模拟
+     * @param success whether the simulation succeeded / 模拟是否成功
+     * @param result final result text / 最终结果文本
+     */
+    private static void finishSimulation(
+            ServerPlayer player,
+            EditorSimulation simulation,
+            boolean success,
+            String result
+    ) {
+        ModNetwork.send(player, "level_play_status", ModStore.toJson(new ModNetwork.LevelPlayStatus(
+                false,
+                simulation.mapId,
+                "SIMULATION",
+                result,
+                0,
+                simulation.totalTicks,
+                success,
+                List.of(),
+                List.of(),
+                List.of(new ModNetwork.MemberProgress(player.getScoreboardName(), success))
+        )));
+        LOGGER.info(
+                "玩家 [{}] 编辑器关卡模拟结束 [地图: {}, 成功: {}, 结果: {}]",
+                player.getScoreboardName(),
+                simulation.mapId,
+                success,
+                result
+        );
     }
 
     /**
@@ -292,8 +505,16 @@ public final class LevelRuntime {
      */
     public static synchronized void restart(ServerPlayer player) {
         GroupSession group = state(player.server).byPlayer.get(player.getUUID());
-        if (group == null || !group.active) {
-            throw new IllegalArgumentException("当前没有可重新开始的关卡会话。");
+        if (group == null) {
+            EditorSimulation simulation = state(player.server).simulations.remove(player.getUUID());
+            if (simulation == null) {
+                throw new IllegalArgumentException("当前没有可重新开始的关卡会话。");
+            }
+            startSimulation(player);
+            return;
+        }
+        if (!group.active) {
+            throw new IllegalArgumentException("当前关卡会话尚未进入地图。");
         }
         ServerPlayer leader = player.server.getPlayerList().getPlayer(group.leaderId);
         if (leader == null) {
@@ -314,7 +535,12 @@ public final class LevelRuntime {
     public static synchronized void exit(ServerPlayer player) {
         GroupSession group = state(player.server).byPlayer.get(player.getUUID());
         if (group == null) {
-            throw new IllegalArgumentException("当前没有活动关卡会话。");
+            EditorSimulation simulation = state(player.server).simulations.remove(player.getUUID());
+            if (simulation == null) {
+                throw new IllegalArgumentException("当前没有活动关卡会话。");
+            }
+            finishSimulation(player, simulation, false, "已停止模拟");
+            return;
         }
         String reason = group.mode == Mode.PREVIEW ? "已退出关卡预览" : player.getScoreboardName() + " 退出了挑战";
         finish(player.server, group, false, reason, false);
@@ -376,6 +602,7 @@ public final class LevelRuntime {
     public static synchronized boolean onLogout(ServerPlayer player) {
         GroupSession group = state(player.server).byPlayer.get(player.getUUID());
         if (group == null) {
+            state(player.server).simulations.remove(player.getUUID());
             return false;
         }
         finish(player.server, group, false, player.getScoreboardName() + " 离线", false);
@@ -436,7 +663,7 @@ public final class LevelRuntime {
         if (success) {
             grantStage(server, group, members);
         }
-        discardTrialPockets(server, group);
+        discardTrialContainers(group);
         for (UUID memberId : group.memberIds) {
             DimensionPool.unbind(server, memberId, group.dimensionKey);
         }
@@ -661,20 +888,27 @@ public final class LevelRuntime {
     }
 
     /**
-     * Finds a matching portal pocket in normal inventory or offhand slots.
-     * 在普通背包或副手槽中查找匹配的门户口袋。
+     * Finds a matching portal container in normal inventory or offhand slots.
+     * 在普通背包或副手槽中查找匹配的门户收纳器。
+     *
+     * @param player portal user / 门户使用者
+     * @param mapId expected level identifier / 预期关卡标识
+     * @param requireStoredVehicle whether the container must hold a vehicle / 收纳器是否必须包含载具
+     * @return matching container, or an empty stack / 匹配的收纳器，不存在时为空物品堆
      */
-    private static ItemStack findPortalPocket(ServerPlayer player, String mapId) {
+    private static ItemStack findPortalContainer(ServerPlayer player, String mapId, boolean requireStoredVehicle) {
         for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
             ItemStack stack = player.getInventory().getItem(slot);
-            if (stack.is(CreateGo.FOURTH_DIMENSIONAL_POCKET_ITEM.get())
-                    && mapId.equals(FourthDimensionalPocketStorage.getLevelId(stack))) {
+            if (LevelVehicleContainer.isPortalContainer(stack)
+                    && mapId.equals(LevelVehicleContainer.getLevelId(stack))
+                    && (!requireStoredVehicle || LevelVehicleContainer.hasStoredVehicle(stack))) {
                 return stack;
             }
         }
         ItemStack offhand = player.getOffhandItem();
-        return offhand.is(CreateGo.FOURTH_DIMENSIONAL_POCKET_ITEM.get())
-                && mapId.equals(FourthDimensionalPocketStorage.getLevelId(offhand))
+        return LevelVehicleContainer.isPortalContainer(offhand)
+                && mapId.equals(LevelVehicleContainer.getLevelId(offhand))
+                && (!requireStoredVehicle || LevelVehicleContainer.hasStoredVehicle(offhand))
                 ? offhand
                 : ItemStack.EMPTY;
     }
@@ -697,12 +931,19 @@ public final class LevelRuntime {
                 return List.of(player);
             }
             Collection<?> onlineMembers = (Collection<?>) team.getClass().getMethod("getOnlineMembers").invoke(team);
-            List<ServerPlayer> result = onlineMembers.stream()
-                    .filter(ServerPlayer.class::isInstance)
-                    .map(ServerPlayer.class::cast)
-                    .distinct()
-                    .toList();
-            return result.contains(player) ? result : List.of(player);
+            Map<UUID, ServerPlayer> result = new LinkedHashMap<>();
+            // Keep the actual portal user first and resolve every teammate by UUID to avoid stale entity references.
+            // 固定将实际门户使用者放在首位，并按 UUID 解析全部队员以避免过期实体引用。
+            result.put(player.getUUID(), player);
+            for (Object member : onlineMembers) {
+                if (member instanceof ServerPlayer onlinePlayer) {
+                    ServerPlayer currentPlayer = player.server.getPlayerList().getPlayer(onlinePlayer.getUUID());
+                    if (currentPlayer != null) {
+                        result.put(currentPlayer.getUUID(), currentPlayer);
+                    }
+                }
+            }
+            return List.copyOf(result.values());
         } catch (ClassNotFoundException ignored) {
             return List.of(player);
         } catch (ReflectiveOperationException exception) {
@@ -719,6 +960,9 @@ public final class LevelRuntime {
         for (ServerPlayer member : members) {
             if (state(server).byPlayer.containsKey(member.getUUID())) {
                 throw new IllegalArgumentException("队员 " + member.getScoreboardName() + " 已处于关卡会话中。");
+            }
+            if (state(server).simulations.containsKey(member.getUUID())) {
+                throw new IllegalArgumentException("队员 " + member.getScoreboardName() + " 正在模拟关卡。");
             }
             if (DimensionPool.activeSession(member) != null) {
                 throw new IllegalArgumentException("队员 " + member.getScoreboardName() + " 正在其他地图会话中。");
@@ -803,14 +1047,11 @@ public final class LevelRuntime {
     }
 
     /**
-     * Deletes all remaining one-time structure files owned by a session.
-     * 删除会话拥有的全部剩余一次性结构文件。
+     * Releases references to remaining one-use containers owned by a session.
+     * 释放会话持有的全部剩余一次性收纳器引用。
      */
-    private static void discardTrialPockets(MinecraftServer server, GroupSession group) {
-        for (ItemStack pocket : group.trialPockets) {
-            FourthDimensionalPocketStorage.discardTrialCopy(server, pocket);
-        }
-        group.trialPockets.clear();
+    private static void discardTrialContainers(GroupSession group) {
+        group.trialContainer = ItemStack.EMPTY;
     }
 
     /**
@@ -852,6 +1093,43 @@ public final class LevelRuntime {
     private static final class RuntimeState {
         private final Map<ResourceKey<Level>, GroupSession> byDimension = new HashMap<>();
         private final Map<UUID, GroupSession> byPlayer = new HashMap<>();
+        private final Map<UUID, EditorSimulation> simulations = new HashMap<>();
+    }
+
+    /**
+     * Stores immutable identity and timing for one editor simulation.
+     * 保存一次编辑器模拟的不可变身份与计时信息。
+     */
+    private static final class EditorSimulation {
+        private final UUID playerId;
+        private final String mapId;
+        private final ResourceKey<Level> dimensionKey;
+        private final int startedTick;
+        private final int totalTicks;
+
+        /**
+         * Creates one editor simulation descriptor.
+         * 创建一条编辑器模拟描述。
+         *
+         * @param playerId editor UUID / 编辑者 UUID
+         * @param mapId simulated map identifier / 模拟地图标识
+         * @param dimensionKey simulated dimension / 模拟维度
+         * @param startedTick start server tick / 开始服务端刻
+         * @param totalTicks total duration / 总持续刻数
+         */
+        private EditorSimulation(
+                UUID playerId,
+                String mapId,
+                ResourceKey<Level> dimensionKey,
+                int startedTick,
+                int totalTicks
+        ) {
+            this.playerId = playerId;
+            this.mapId = mapId;
+            this.dimensionKey = dimensionKey;
+            this.startedTick = startedTick;
+            this.totalTicks = totalTicks;
+        }
     }
 
     /**
@@ -867,7 +1145,7 @@ public final class LevelRuntime {
         private final ResourceKey<Level> dimensionKey;
         private final ItemStack portalTemplate;
         private final int totalTicks;
-        private final List<ItemStack> trialPockets = new ArrayList<>();
+        private ItemStack trialContainer = ItemStack.EMPTY;
         private int startedTick;
         private boolean transitioning;
         private boolean active;

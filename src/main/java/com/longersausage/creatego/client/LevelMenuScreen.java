@@ -80,7 +80,11 @@ public final class LevelMenuScreen extends BaseScreen {
         UITheme.roundedPanel(graphics, left, top, 440, 308, 10, UITheme.BORDER, UITheme.SURFACE);
         graphics.drawString(font, Component.translatable("screen.creatego.level_menu"), left + 20, top + 17, UITheme.TEXT, false);
         graphics.drawString(font, status.mapId, left + 112, top + 17, UITheme.ACCENT, false);
-        String mode = "PREVIEW".equals(status.mode) ? "预览" : "挑战";
+        String mode = switch (status.mode) {
+            case "PREVIEW" -> "预览";
+            case "SIMULATION" -> "模拟";
+            default -> "挑战";
+        };
         String time = status.totalTicks <= 0 ? "--:--" : formatTime(status.remainingTicks);
         graphics.drawString(font, mode + "  ·  剩余时间 " + time, left + 20, top + 40, UITheme.TEXT_MUTED, false);
         graphics.drawString(font, "过关条件与完成度", left + 20, top + 68, UITheme.TEXT, false);

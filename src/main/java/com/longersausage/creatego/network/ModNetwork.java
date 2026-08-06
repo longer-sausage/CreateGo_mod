@@ -45,7 +45,9 @@ public final class ModNetwork {
      * @param event payload registration event / 载荷注册事件
      */
     public static void register(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("1");
+        // Optional negotiation keeps LAN reconnects usable when NeoForge rebuilds an integrated-server connection as a common channel connection.
+        // 可选协商可在 NeoForge 将二次开放的局域网连接重建为通用通道连接时保持连接可用。
+        PayloadRegistrar registrar = event.registrar("1").optional();
         registrar.playToServer(
                 ServerboundActionPayload.TYPE,
                 ServerboundActionPayload.STREAM_CODEC,

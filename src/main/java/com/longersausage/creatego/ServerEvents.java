@@ -11,13 +11,16 @@ package com.longersausage.creatego;
 import com.longersausage.creatego.network.ModNetwork;
 import com.longersausage.creatego.server.DialogueRuntime;
 import com.longersausage.creatego.server.DimensionPool;
-import com.longersausage.creatego.server.ModService;
 import com.longersausage.creatego.server.LevelRuntime;
+import com.longersausage.creatego.server.LevelVehicleContainer;
+import com.longersausage.creatego.server.ModService;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionResult;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.EntityTravelToDimensionEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.level.BlockEvent;
@@ -175,6 +178,56 @@ public final class ServerEvents {
     }
 
     /**
+     * Opens level details instead of releasing a portal container when sneak-using a block.
+     * 潜行对方块使用门户收纳器时打开关卡详情，而不是释放载具。
+     *
+     * @param event right-click block event / 右键方块事件
+     */
+    @SubscribeEvent
+    public static void onRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+        if (openPortalDetails(event)) {
+            event.setCanceled(true);
+            event.setCancellationResult(InteractionResult.SUCCESS);
+        }
+    }
+
+    /**
+     * Opens level details when sneak-using a portal container in the air.
+     * 潜行在空气中使用门户收纳器时打开关卡详情。
+     *
+     * @param event right-click item event / 右键物品事件
+     */
+    @SubscribeEvent
+    public static void onRightClickItem(PlayerInteractEvent.RightClickItem event) {
+        if (openPortalDetails(event)) {
+            event.setCanceled(true);
+            event.setCancellationResult(InteractionResult.SUCCESS);
+        }
+    }
+
+    /**
+     * Handles the shared server-side portal interaction check.
+     * 处理共用的服务端门户交互检查。
+     *
+     * @param event player interaction event / 玩家交互事件
+     * @return whether level details were opened / 是否已打开关卡详情
+     */
+    private static boolean openPortalDetails(PlayerInteractEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player) || !player.isShiftKeyDown()) {
+            return false;
+        }
+        if (!LevelVehicleContainer.isPortalContainer(event.getItemStack())) {
+            return false;
+        }
+        String levelId = LevelVehicleContainer.getLevelId(event.getItemStack());
+        if (levelId.isBlank()) {
+            return false;
+        }
+        ModNetwork.openLevelDetails(player, levelId);
+        return true;
+    }
+
+    /**
      * Prevents challenge participants from breaking blocks.
      * 阻止挑战参与者破坏方块。
      *
@@ -188,8 +241,8 @@ public final class ServerEvents {
     }
 
     /**
-     * Prevents challenge participants from placing blocks while preserving pocket structure release.
-     * 阻止挑战参与者放置方块，同时保留四次元口袋释放物理结构的能力。
+     * Prevents challenge participants from placing blocks while preserving vehicle release.
+     * 阻止挑战参与者放置方块，同时保留载具释放能力。
      *
      * @param event block placement event / 方块放置事件
      */
